@@ -319,8 +319,8 @@ func (s *fakeBackupService) GetAllBackups(bucket string) ([]*api.Backup, error) 
 	return backups, nil
 }
 
-func (bs *fakeBackupService) UploadBackup(bucket, name string, metadata, backup io.ReadSeeker) error {
-	args := bs.Called(bucket, name, metadata, backup)
+func (bs *fakeBackupService) UploadBackup(bucket, name string, metadata, backup, log io.ReadSeeker) error {
+	args := bs.Called(bucket, name, metadata, backup, log)
 	return args.Error(0)
 }
 
