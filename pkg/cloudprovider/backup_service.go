@@ -46,6 +46,10 @@ type BackupService interface {
 
 	// DeleteBackup deletes the backup content in object storage for the given api.Backup.
 	DeleteBackup(bucket, backupName string) error
+
+	// CreateBackupLogSignedURL creates a pre-signed URL that can be used to download a backup's log
+	// file from object storage. The URL expires after ttl.
+	CreateBackupLogSignedURL(bucket, backupName string, ttl time.Duration) (string, error)
 }
 
 // BackupGetter knows how to list backups in object storage.
@@ -59,6 +63,18 @@ const (
 	backupFileFormatString   = "%s/%s.tar.gz"
 	logFileFormatString      = "%s/%s.log.gz"
 )
+
+func getMetadataKey(backup string) string {
+	return fmt.Sprintf(metadataFileFormatString, backup)
+}
+
+func getBackupKey(backup string) string {
+	return fmt.Sprintf(backupFileFormatString, backup, backup)
+}
+
+func getBackupLogKey(backup string) string {
+	return fmt.Sprintf(logFileFormatString, backup, backup)
+}
 
 type backupService struct {
 	objectStorage ObjectStorageAdapter
@@ -76,15 +92,14 @@ func NewBackupService(objectStorage ObjectStorageAdapter) BackupService {
 
 func (br *backupService) UploadBackup(bucket, backupName string, metadata, backup, log io.ReadSeeker) error {
 	// upload metadata file
-	metadataKey := fmt.Sprintf(metadataFileFormatString, backupName)
+	metadataKey := getMetadataKey(backupName)
 	if err := br.objectStorage.PutObject(bucket, metadataKey, metadata); err != nil {
 		// failure to upload metadata file is a hard-stop
 		return err
 	}
 
 	// upload tar file
-	backupKey := fmt.Sprintf(backupFileFormatString, backupName, backupName)
-	if err := br.objectStorage.PutObject(bucket, backupKey, backup); err != nil {
+	if err := br.objectStorage.PutObject(bucket, getBackupKey(backupName), backup); err != nil {
 		// try to delete the metadata file since the data upload failed
 		deleteErr := br.objectStorage.DeleteObject(bucket, metadataKey)
 
@@ -93,7 +108,7 @@ func (br *backupService) UploadBackup(bucket, backupName string, metadata, backu
 
 	// uploading log file is best-effort; if it fails, we log the error but call the overall upload a
 	// success
-	logKey := fmt.Sprintf(logFileFormatString, backupName, backupName)
+	logKey := getBackupLogKey(backupName)
 	if err := br.objectStorage.PutObject(bucket, logKey, log); err != nil {
 		glog.Errorf("error uploading %s/%s: %v", bucket, logKey, err)
 	}
@@ -102,7 +117,7 @@ func (br *backupService) UploadBackup(bucket, backupName string, metadata, backu
 }
 
 func (br *backupService) DownloadBackup(bucket, backupName string) (io.ReadCloser, error) {
-	return br.objectStorage.GetObject(bucket, fmt.Sprintf(backupFileFormatString, backupName, backupName))
+	return br.objectStorage.GetObject(bucket, getBackupKey(backupName))
 }
 
 func (br *backupService) GetAllBackups(bucket string) ([]*api.Backup, error) {
@@ -120,8 +135,7 @@ func (br *backupService) GetAllBackups(bucket string) ([]*api.Backup, error) {
 
 	for _, backupDir := range prefixes {
 		err := func() error {
-			key := fmt.Sprintf(metadataFileFormatString, backupDir)
-
+			key := getMetadataKey(backupDir)
 			res, err := br.objectStorage.GetObject(bucket, key)
 			if err != nil {
 				return err
@@ -159,19 +173,23 @@ func (br *backupService) GetAllBackups(bucket string) ([]*api.Backup, error) {
 func (br *backupService) DeleteBackup(bucket, backupName string) error {
 	var errs []error
 
-	key := fmt.Sprintf(backupFileFormatString, backupName, backupName)
+	key := getBackupKey(backupName)
 	glog.V(4).Infof("Trying to delete bucket=%s, key=%s", bucket, key)
 	if err := br.objectStorage.DeleteObject(bucket, key); err != nil {
 		errs = append(errs, err)
 	}
 
-	key = fmt.Sprintf(metadataFileFormatString, backupName)
+	key = getMetadataKey(backupName)
 	glog.V(4).Infof("Trying to delete bucket=%s, key=%s", bucket, key)
 	if err := br.objectStorage.DeleteObject(bucket, key); err != nil {
 		errs = append(errs, err)
 	}
 
 	return errors.NewAggregate(errs)
+}
+
+func (br *backupService) CreateBackupLogSignedURL(bucket, backupName string, ttl time.Duration) (string, error) {
+	return br.objectStorage.CreateSignedURL(bucket, getBackupLogKey(backupName), ttl)
 }
 
 // cachedBackupService wraps a real backup service with a cache for getting cloud backups.
