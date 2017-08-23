@@ -8,12 +8,13 @@ Create a restore
 Create a restore
 
 ```
-ark restore create BACKUP
+ark restore create BACKUP [flags]
 ```
 
 ### Options
 
 ```
+  -h, --help                                  help for create
       --label-columns stringArray             a comma-separated list of labels to be displayed as columns
       --labels mapStringString                labels to apply to the restore
       --namespace-mappings mapStringString    namespace mappings from name in the backup to desired restored name in the form src1:dst1,src2:dst2,...
