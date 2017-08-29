@@ -232,6 +232,22 @@ func (c *downloadRequestController) generatePreSignedURL(downloadRequest *v1.Dow
 
 		_, err = c.downloadRequestClient.DownloadRequests(update.Namespace).Update(update)
 		return err
+	case v1.DownloadTargetKindBackup:
+		update, err := cloneDownloadRequest(downloadRequest)
+		if err != nil {
+			return err
+		}
+
+		update.Status.DownloadURL, err = c.backupService.CreateBackupSignedURL(c.bucket, update.Spec.Target.Name, signedURLTTL)
+		if err != nil {
+			return err
+		}
+
+		update.Status.Phase = v1.DownloadRequestPhaseProcessed
+		update.Status.Expiration = metav1.NewTime(c.clock.Now().Add(signedURLTTL))
+
+		_, err = c.downloadRequestClient.DownloadRequests(update.Namespace).Update(update)
+		return err
 	}
 
 	return fmt.Errorf("unsupported download target kind %q", downloadRequest.Spec.Target.Kind)

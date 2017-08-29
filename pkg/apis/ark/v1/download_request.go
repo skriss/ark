@@ -29,6 +29,7 @@ type DownloadTargetKind string
 
 const (
 	DownloadTargetKindBackupLog DownloadTargetKind = "BackupLog"
+	DownloadTargetKindBackup    DownloadTargetKind = "Backup"
 )
 
 // DownloadTarget is the specification for what kind of file to download, and the name of the

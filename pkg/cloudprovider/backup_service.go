@@ -50,6 +50,10 @@ type BackupService interface {
 	// CreateBackupLogSignedURL creates a pre-signed URL that can be used to download a backup's log
 	// file from object storage. The URL expires after ttl.
 	CreateBackupLogSignedURL(bucket, backupName string, ttl time.Duration) (string, error)
+
+	// CreateBackupSignedURL creates a pre-signed URL that can be used to download a backup
+	// file from object storage. The URL expires after ttl.
+	CreateBackupSignedURL(bucket, backupName string, ttl time.Duration) (string, error)
 }
 
 // BackupGetter knows how to list backups in object storage.
@@ -190,6 +194,10 @@ func (br *backupService) DeleteBackup(bucket, backupName string) error {
 
 func (br *backupService) CreateBackupLogSignedURL(bucket, backupName string, ttl time.Duration) (string, error) {
 	return br.objectStorage.CreateSignedURL(bucket, getBackupLogKey(backupName), ttl)
+}
+
+func (br *backupService) CreateBackupSignedURL(bucket, backupName string, ttl time.Duration) (string, error) {
+	return br.objectStorage.CreateSignedURL(bucket, getBackupKey(backupName), ttl)
 }
 
 // cachedBackupService wraps a real backup service with a cache for getting cloud backups.
