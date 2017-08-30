@@ -128,6 +128,9 @@ func (o *DiffOptions) Run(c *cobra.Command, f client.Factory) error {
 	report, err := diff.Generate(options)
 	cmd.CheckError(err)
 
+	// TODO we probably want to exclude things with controller owners, or do something
+	// intelligent with them. They'll have different names so can't be matched up.
+
 	diff.PrintDeltas(report.LeftOnly, os.Stdout, true)
 	diff.PrintDeltas(report.Both, os.Stdout, true)
 

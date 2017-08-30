@@ -71,6 +71,7 @@ func (left ResourceSet) Except(right ResourceSet) ResourceSet {
 	for k := range left {
 		if right[k] == nil {
 			except[k] = left[k]
+			except[k].Diff = gojsondiff.New().CompareObjects(left[k].Object, make(map[string]interface{}))
 		}
 	}
 
