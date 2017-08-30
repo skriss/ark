@@ -45,7 +45,9 @@ import (
 	"github.com/heptio/ark/pkg/discovery"
 	arkv1client "github.com/heptio/ark/pkg/generated/clientset/typed/ark/v1"
 	"github.com/heptio/ark/pkg/restore/restorers"
+	"github.com/heptio/ark/pkg/util/filesystem"
 	"github.com/heptio/ark/pkg/util/kube"
+	arktar "github.com/heptio/ark/pkg/util/tar"
 )
 
 // Restorer knows how to restore a backup.
@@ -68,7 +70,7 @@ type kubernetesRestorer struct {
 	backupClient       arkv1client.BackupsGetter
 	namespaceClient    corev1.NamespaceInterface
 	resourcePriorities []string
-	fileSystem         FileSystem
+	fileSystem         filesystem.FileSystem
 }
 
 // prioritizeResources takes a list of pre-prioritized resources and a full list of resources to restore,
@@ -148,7 +150,7 @@ func NewKubernetesRestorer(
 		backupClient:       backupClient,
 		namespaceClient:    namespaceClient,
 		resourcePriorities: resourcePriorities,
-		fileSystem:         &osFileSystem{},
+		fileSystem:         &filesystem.OSFileSystem{},
 	}, nil
 }
 
@@ -531,61 +533,5 @@ func (kr *kubernetesRestorer) unzipAndExtractBackup(src io.Reader) (string, erro
 	}
 	defer gzr.Close()
 
-	return kr.readBackup(tar.NewReader(gzr))
-}
-
-// readBackup extracts a tar reader to a local directory/file tree within a
-// temp directory.
-func (kr *kubernetesRestorer) readBackup(tarRdr *tar.Reader) (string, error) {
-	dir, err := kr.fileSystem.TempDir("", "")
-	if err != nil {
-		glog.Errorf("error creating temp dir: %v", err)
-		return "", err
-	}
-
-	for {
-		header, err := tarRdr.Next()
-
-		if err == io.EOF {
-			glog.Infof("end of tar")
-			break
-		}
-		if err != nil {
-			glog.Errorf("error reading tar: %v", err)
-			return "", err
-		}
-
-		target := path.Join(dir, header.Name)
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			err := kr.fileSystem.MkdirAll(target, header.FileInfo().Mode())
-			if err != nil {
-				glog.Errorf("mkdirall error: %v", err)
-				return "", err
-			}
-
-		case tar.TypeReg:
-			// make sure we have the directory created
-			err := kr.fileSystem.MkdirAll(path.Dir(target), header.FileInfo().Mode())
-			if err != nil {
-				glog.Errorf("mkdirall error: %v", err)
-				return "", err
-			}
-
-			// create the file
-			file, err := kr.fileSystem.Create(target)
-			if err != nil {
-				return "", err
-			}
-			defer file.Close()
-
-			if _, err := io.Copy(file, tarRdr); err != nil {
-				glog.Errorf("error copying: %v", err)
-				return "", err
-			}
-		}
-	}
-
-	return dir, nil
+	return arktar.ExtractToTempDir(tar.NewReader(gzr), kr.fileSystem)
 }

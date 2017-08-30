@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package restore
+package filesystem
 
 import (
 	"io"
@@ -34,36 +34,36 @@ type FileSystem interface {
 	DirExists(path string) (bool, error)
 }
 
-var _ FileSystem = &osFileSystem{}
+var _ FileSystem = &OSFileSystem{}
 
-type osFileSystem struct {
+type OSFileSystem struct {
 }
 
-func (fs *osFileSystem) TempDir(dir, prefix string) (string, error) {
+func (fs *OSFileSystem) TempDir(dir, prefix string) (string, error) {
 	return ioutil.TempDir(dir, prefix)
 }
 
-func (fs *osFileSystem) MkdirAll(path string, perm os.FileMode) error {
+func (fs *OSFileSystem) MkdirAll(path string, perm os.FileMode) error {
 	return os.MkdirAll(path, perm)
 }
 
-func (fs *osFileSystem) Create(name string) (io.WriteCloser, error) {
+func (fs *OSFileSystem) Create(name string) (io.WriteCloser, error) {
 	return os.Create(name)
 }
 
-func (fs *osFileSystem) RemoveAll(path string) error {
+func (fs *OSFileSystem) RemoveAll(path string) error {
 	return os.RemoveAll(path)
 }
 
-func (fs *osFileSystem) ReadDir(dirname string) ([]os.FileInfo, error) {
+func (fs *OSFileSystem) ReadDir(dirname string) ([]os.FileInfo, error) {
 	return ioutil.ReadDir(dirname)
 }
 
-func (fs *osFileSystem) ReadFile(filename string) ([]byte, error) {
+func (fs *OSFileSystem) ReadFile(filename string) ([]byte, error) {
 	return ioutil.ReadFile(filename)
 }
 
-func (fs *osFileSystem) DirExists(path string) (bool, error) {
+func (fs *OSFileSystem) DirExists(path string) (bool, error) {
 	_, err := os.Stat(path)
 	if err == nil {
 		return true, nil
