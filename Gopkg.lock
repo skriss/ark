@@ -253,6 +253,12 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/sergi/go-diff"
+  packages = ["diffmatchpatch"]
+  revision = "feef008d51ad2b3778f85d387ccf91735543008d"
+
+[[projects]]
+  branch = "master"
   name = "github.com/shurcooL/sanitized_anchor_name"
   packages = ["."]
   revision = "541ff5ee47f1dddf6a5281af78307d921524bcb5"
@@ -292,6 +298,18 @@
   name = "github.com/ugorji/go"
   packages = ["codec"]
   revision = "5efa3251c7f7d05e5d9704a69a984ec9f1386a40"
+
+[[projects]]
+  name = "github.com/yudai/gojsondiff"
+  packages = [".","formatter"]
+  revision = "d53dddaf16b9f5b19737f4722943e7e1f289af13"
+  version = "v1.0.0"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/yudai/golcs"
+  packages = ["."]
+  revision = "ecda9a501e8220fae3b4b600c3db4b0ba22cfc68"
 
 [[projects]]
   branch = "master"
@@ -391,6 +409,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "1739acba4589d0e177479f7cad479483b6951d15483af6b8c72028a8ec4b275e"
+  inputs-digest = "6b363b593d5b5c2652388e3cd0a3b3c0e99f21a7d403d2d991837179ab27289a"
   solver-name = "gps-cdcl"
   solver-version = 1
