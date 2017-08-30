@@ -17,6 +17,8 @@ limitations under the License.
 package backup
 
 import (
+	"archive/tar"
+	"bytes"
 	"errors"
 	"os"
 	"time"
@@ -29,6 +31,10 @@ import (
 	"github.com/heptio/ark/pkg/cmd"
 	"github.com/heptio/ark/pkg/cmd/util/downloadrequest"
 	"github.com/heptio/ark/pkg/cmd/util/flag"
+	"github.com/heptio/ark/pkg/diff"
+	"github.com/heptio/ark/pkg/diff/source"
+	"github.com/heptio/ark/pkg/util/filesystem"
+	arktar "github.com/heptio/ark/pkg/util/tar"
 )
 
 func NewDiffCommand(f client.Factory) *cobra.Command {
@@ -69,13 +75,13 @@ func NewDiffOptions() *DiffOptions {
 }
 
 func (o *DiffOptions) BindFlags(flags *pflag.FlagSet) {
-	flags.Var(&o.IncludeNamespaces, "include-namespaces", "namespaces to include in the backup (use '*' for all namespaces)")
-	flags.Var(&o.ExcludeNamespaces, "exclude-namespaces", "namespaces to exclude from the backup")
-	flags.Var(&o.IncludeResources, "include-resources", "resources to include in the backup, formatted as resource.group, such as storageclasses.storage.k8s.io (use '*' for all resources)")
-	flags.Var(&o.ExcludeResources, "exclude-resources", "resources to exclude from the backup, formatted as resource.group, such as storageclasses.storage.k8s.io")
-	flags.VarP(&o.Selector, "selector", "l", "only back up resources matching this label selector")
-	flags.Var(&o.NamespaceMappings, "namespace-mappings", "namespace mappings from name in the backup to desired restored name in the form src1:dst1,src2:dst2,...")
-	flags.DurationVar(&o.Timeout, "timeout", o.Timeout, "how long to wait to receive backup")
+	flags.Var(&o.IncludeNamespaces, "include-namespaces", "namespaces to include in the diff (use '*' for all namespaces)")
+	flags.Var(&o.ExcludeNamespaces, "exclude-namespaces", "namespaces to exclude from the diff")
+	flags.Var(&o.IncludeResources, "include-resources", "resources to include in the diff, formatted as resource.group, such as storageclasses.storage.k8s.io (use '*' for all resources)")
+	flags.Var(&o.ExcludeResources, "exclude-resources", "resources to exclude from the diff, formatted as resource.group, such as storageclasses.storage.k8s.io")
+	flags.VarP(&o.Selector, "selector", "l", "only diff resources matching this label selector")
+	flags.Var(&o.NamespaceMappings, "namespace-mappings", "namespace mappings from name in the backup to desired namespace for compare in the form src1:dst1,src2:dst2,...")
+	flags.DurationVar(&o.Timeout, "timeout", o.Timeout, "how long to wait to receive backup from object storage")
 }
 
 func (o *DiffOptions) Validate(c *cobra.Command, args []string) error {
@@ -95,12 +101,35 @@ func (o *DiffOptions) Run(c *cobra.Command, f client.Factory) error {
 	arkClient, err := f.Client()
 	cmd.CheckError(err)
 
-	// TODO stream the download to something that can extract the backup
+	var (
+		buf       = &bytes.Buffer{}
+		tarReader = tar.NewReader(buf)
+		fs        = &filesystem.OSFileSystem{}
+	)
 
-	err = downloadrequest.Stream(arkClient.ArkV1(), o.BackupName, v1.DownloadTargetKindBackup, os.Stdout, o.Timeout)
+	err = downloadrequest.Stream(arkClient.ArkV1(), o.BackupName, v1.DownloadTargetKindBackup, buf, o.Timeout)
 	cmd.CheckError(err)
 
-	// TODO do diff
+	dir, err := arktar.ExtractToTempDir(tarReader, fs)
+	cmd.CheckError(err)
+	defer fs.RemoveAll(dir)
+
+	left, err := source.Directory(dir)
+	cmd.CheckError(err)
+
+	// TODO finding config should be more robust than this
+	right, err := source.Cluster(os.Getenv("KUBECONFIG"))
+	cmd.CheckError(err)
+
+	options := &diff.Options{
+		Left:  left,
+		Right: right,
+	}
+	report, err := diff.Generate(options)
+	cmd.CheckError(err)
+
+	diff.PrintDeltas(report.LeftOnly, os.Stdout, true)
+	diff.PrintDeltas(report.Both, os.Stdout, true)
 
 	return nil
 }
