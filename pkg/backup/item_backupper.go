@@ -19,7 +19,10 @@ package backup
 import (
 	"archive/tar"
 	"encoding/json"
+	"fmt"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -30,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/client"
@@ -82,6 +86,7 @@ func (f *defaultItemBackupperFactory) newItemBackupper(
 		itemHookHandler: &defaultItemHookHandler{
 			podCommandExecutor: podCommandExecutor,
 		},
+		podCommandExecutor: podCommandExecutor,
 	}
 
 	// this is for testing purposes
@@ -95,16 +100,17 @@ type ItemBackupper interface {
 }
 
 type defaultItemBackupper struct {
-	backup          *api.Backup
-	namespaces      *collections.IncludesExcludes
-	resources       *collections.IncludesExcludes
-	backedUpItems   map[itemKey]struct{}
-	actions         []resolvedAction
-	tarWriter       tarWriter
-	resourceHooks   []resourceHook
-	dynamicFactory  client.DynamicFactory
-	discoveryHelper discovery.Helper
-	snapshotService cloudprovider.SnapshotService
+	backup             *api.Backup
+	namespaces         *collections.IncludesExcludes
+	resources          *collections.IncludesExcludes
+	backedUpItems      map[itemKey]struct{}
+	actions            []resolvedAction
+	tarWriter          tarWriter
+	resourceHooks      []resourceHook
+	dynamicFactory     client.DynamicFactory
+	discoveryHelper    discovery.Helper
+	snapshotService    cloudprovider.SnapshotService
+	podCommandExecutor podCommandExecutor
 
 	itemHookHandler         itemHookHandler
 	additionalItemBackupper ItemBackupper
@@ -233,6 +239,12 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 		}
 	}
 
+	if groupResource == podsGroupResource {
+		if err := ib.handleResticBackup(obj, ib.backup, log); err != nil {
+			return err
+		}
+	}
+
 	log.Debug("Executing post hooks")
 	if err := ib.itemHookHandler.handleHooks(log, groupResource, obj, ib.resourceHooks, hookPhasePost); err != nil {
 		return err
@@ -267,6 +279,108 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 	}
 
 	return nil
+}
+
+func (ib *defaultItemBackupper) handleResticBackup(pod runtime.Unstructured, backup *api.Backup, log logrus.FieldLogger) error {
+	metadata, err := meta.Accessor(pod)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
+	backupsValue := metadata.GetAnnotations()["backup.ark.heptio.com/backup-volumes"]
+	if backupsValue == "" {
+		return nil
+	}
+
+	var backups []string
+	// check for json array
+	if backupsValue[0] == '[' {
+		if err := json.Unmarshal([]byte(backupsValue), &backups); err != nil {
+			backups = []string{backupsValue}
+		}
+	} else {
+		backups = append(backups, backupsValue)
+	}
+
+	var errs []error
+
+	for _, volume := range backups {
+		tags := map[string]string{
+			"backup": backup.Name,
+			"ns":     metadata.GetNamespace(),
+			"pod":    metadata.GetName(),
+			"volume": volume,
+		}
+
+		cmd := &api.ExecHook{
+			Container: "restic",
+			Command:   getBackupCommand(volume, tags),
+			OnError:   api.HookErrorModeFail,
+			Timeout:   metav1.Duration{Duration: time.Minute},
+		}
+
+		if err := ib.podCommandExecutor.executePodCommand(log, pod.UnstructuredContent(), metadata.GetNamespace(), metadata.GetName(), "restic-backup", cmd); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		if snapshotID := getSnapshotID(backup.Name, metadata.GetNamespace(), metadata.GetName(), volume, log); snapshotID != "" {
+			annotations := metadata.GetAnnotations()
+
+			annotations["snapshot.ark.heptio.com/"+volume] = snapshotID
+
+			metadata.SetAnnotations(annotations)
+		}
+	}
+
+	return kubeerrs.NewAggregate(errs)
+}
+
+func getBackupCommand(volume string, tags map[string]string) []string {
+	res := []string{"/restic", "backup", "/" + volume}
+
+	for k, v := range tags {
+		res = append(res, fmt.Sprintf("--tag=%s=%s", k, v))
+	}
+
+	return res
+}
+
+func getSnapshotID(backup, namespace, pod, volume string, log logrus.FieldLogger) string {
+	cmd := exec.Command("/restic", "snapshots", "--json", "--last")
+
+	tagFilters := []string{"ns=" + namespace, "pod=" + pod, "volume=" + volume, "backup=" + backup}
+
+	cmd.Args = append(cmd.Args, "--tag="+strings.Join(tagFilters, ","))
+
+	log.Infof("Running cmd=%v", cmd.Args)
+
+	res, err := cmd.Output()
+	if err != nil {
+		log.Errorf("error running restic snapshots cmd: %s", err)
+		return ""
+	}
+
+	log.Warnf("restic snapshots result: %s", res)
+
+	type jsonArray []map[string]interface{}
+
+	var snapshots jsonArray
+
+	if err := json.Unmarshal(res, &snapshots); err != nil {
+		log.Errorf("error unmarshalling restic snapshots result: %s", err)
+		return ""
+	}
+
+	if len(snapshots) > 1 {
+		log.Errorf("more than one matching snapshot found.")
+		return ""
+	} else if len(snapshots) == 0 {
+		log.Errorf("no matching snapshot found.")
+		return ""
+	}
+
+	return snapshots[0]["short_id"].(string)
 }
 
 // zoneLabel is the label that stores availability-zone info

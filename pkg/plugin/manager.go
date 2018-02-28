@@ -188,6 +188,7 @@ func (m *manager) registerPlugins() error {
 	m.pluginRegistry.register("job", arkCommand, []string{"run-plugin", string(PluginKindRestoreItemAction), "job"}, PluginKindRestoreItemAction)
 	m.pluginRegistry.register("restore-pod", arkCommand, []string{"run-plugin", string(PluginKindRestoreItemAction), "pod"}, PluginKindRestoreItemAction)
 	m.pluginRegistry.register("svc", arkCommand, []string{"run-plugin", string(PluginKindRestoreItemAction), "svc"}, PluginKindRestoreItemAction)
+	m.pluginRegistry.register("svc", arkCommand, []string{"run-plugin", string(PluginKindRestoreItemAction), "snapshot"}, PluginKindRestoreItemAction)
 
 	// second, register external plugins (these will override internal plugins, if applicable)
 	if _, err := os.Stat(m.pluginDir); err != nil {

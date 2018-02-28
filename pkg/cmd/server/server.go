@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"os/exec"
 	"reflect"
 	"sort"
 	"strings"
@@ -242,6 +243,10 @@ func (s *server) run() error {
 		return err
 	}
 
+	if err := s.initResticRepository(config); err != nil {
+		return err
+	}
+
 	if err := s.runControllers(config); err != nil {
 		return err
 	}
@@ -426,6 +431,26 @@ func durationMin(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+func (s *server) initResticRepository(config *api.Config) error {
+	s.logger.Info("Ensuring restic repository")
+
+	output, err := exec.Command("/restic", "check").Output()
+	if err == nil {
+		s.logger.Infof("restic check successful: %s", output)
+		return nil
+	}
+	s.logger.Info("restic check returned an error: %s", err)
+
+	s.logger.Info("Attempting to initialize restic repository")
+	output, err = exec.Command("/restic", "check").Output()
+	if err != nil {
+		return errors.Wrap(err, "error initializing restic repository")
+	}
+	s.logger.Info("Restic repository initialized.")
+
+	return nil
 }
 
 func (s *server) runControllers(config *api.Config) error {

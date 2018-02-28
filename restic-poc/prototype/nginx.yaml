@@ -1,0 +1,56 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: nginx
+  labels:
+    app: nginx
+  annotations:
+    backup.ark.heptio.com/backup-volumes: '["nginx-logs"]'
+spec:
+  volumes:
+    - name: nginx-logs
+      emptyDir: {}
+  containers:
+    - image: nginx:1.7.9
+      name: nginx
+      ports:
+        - containerPort: 80
+      volumeMounts:
+        - name: nginx-logs
+          mountPath: /var/log/nginx
+    - image: gcr.io/steve-heptio/restic:v0.8.2
+      name: restic
+      env:
+        - name: RESTIC_REPOSITORY
+          valueFrom:
+            secretKeyRef:
+              name: restic-credentials
+              key: RESTIC_REPOSITORY
+        - name: RESTIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: restic-credentials
+              key: RESTIC_PASSWORD
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: restic-credentials
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: restic-credentials
+              key: AWS_SECRET_ACCESS_KEY
+      volumeMounts:
+        - name: nginx-logs
+          mountPath: /nginx-logs
