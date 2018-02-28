@@ -19,17 +19,23 @@ package backup
 import (
 	"archive/tar"
 	"encoding/json"
+	"fmt"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
+	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/client"
@@ -51,6 +57,7 @@ type itemBackupperFactory interface {
 		dynamicFactory client.DynamicFactory,
 		discoveryHelper discovery.Helper,
 		snapshotService cloudprovider.SnapshotService,
+		podClient v1.PodInterface,
 	) ItemBackupper
 }
 
@@ -67,6 +74,7 @@ func (f *defaultItemBackupperFactory) newItemBackupper(
 	dynamicFactory client.DynamicFactory,
 	discoveryHelper discovery.Helper,
 	snapshotService cloudprovider.SnapshotService,
+	podClient v1.PodInterface,
 ) ItemBackupper {
 	ib := &defaultItemBackupper{
 		backup:          backup,
@@ -82,6 +90,8 @@ func (f *defaultItemBackupperFactory) newItemBackupper(
 		itemHookHandler: &defaultItemHookHandler{
 			podCommandExecutor: podCommandExecutor,
 		},
+		podCommandExecutor: podCommandExecutor,
+		podClient:          podClient,
 	}
 
 	// this is for testing purposes
@@ -95,19 +105,20 @@ type ItemBackupper interface {
 }
 
 type defaultItemBackupper struct {
-	backup          *api.Backup
-	namespaces      *collections.IncludesExcludes
-	resources       *collections.IncludesExcludes
-	backedUpItems   map[itemKey]struct{}
-	actions         []resolvedAction
-	tarWriter       tarWriter
-	resourceHooks   []resourceHook
-	dynamicFactory  client.DynamicFactory
-	discoveryHelper discovery.Helper
-	snapshotService cloudprovider.SnapshotService
-
+	backup                  *api.Backup
+	namespaces              *collections.IncludesExcludes
+	resources               *collections.IncludesExcludes
+	backedUpItems           map[itemKey]struct{}
+	actions                 []resolvedAction
+	tarWriter               tarWriter
+	resourceHooks           []resourceHook
+	dynamicFactory          client.DynamicFactory
+	discoveryHelper         discovery.Helper
+	snapshotService         cloudprovider.SnapshotService
+	podCommandExecutor      podCommandExecutor
 	itemHookHandler         itemHookHandler
 	additionalItemBackupper ItemBackupper
+	podClient               v1.PodInterface
 }
 
 var podsGroupResource = schema.GroupResource{Group: "", Resource: "pods"}
@@ -161,9 +172,6 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 	ib.backedUpItems[key] = struct{}{}
 
 	log.Info("Backing up resource")
-
-	// Never save status
-	delete(obj.UnstructuredContent(), "status")
 
 	log.Debug("Executing pre hooks")
 	if err := ib.itemHookHandler.handleHooks(log, groupResource, obj, ib.resourceHooks, hookPhasePre); err != nil {
@@ -233,10 +241,19 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 		}
 	}
 
+	if groupResource == podsGroupResource {
+		if err := ib.handleResticBackup(obj, ib.backup, log); err != nil {
+			return err
+		}
+	}
+
 	log.Debug("Executing post hooks")
 	if err := ib.itemHookHandler.handleHooks(log, groupResource, obj, ib.resourceHooks, hookPhasePost); err != nil {
 		return err
 	}
+
+	// Never save status
+	delete(obj.UnstructuredContent(), "status")
 
 	var filePath string
 	if namespace != "" {
@@ -267,6 +284,209 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 	}
 
 	return nil
+}
+
+func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstructured, backup *api.Backup, log logrus.FieldLogger) error {
+	var pod apiv1.Pod
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPod.UnstructuredContent(), &pod); err != nil {
+		return err
+	}
+
+	backupsValue := pod.Annotations["backup.ark.heptio.com/backup-volumes"]
+	if backupsValue == "" {
+		return nil
+	}
+
+	var backups []string
+	// check for json array
+	if backupsValue[0] == '[' {
+		if err := json.Unmarshal([]byte(backupsValue), &backups); err != nil {
+			backups = []string{backupsValue}
+		}
+	} else {
+		backups = append(backups, backupsValue)
+	}
+
+	// have to modify the unstructured pod's annotations so it gets persisted to the backup
+	metadata, err := meta.Accessor(unstructuredPod)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
+	podAnnotations := metadata.GetAnnotations()
+
+	var errs []error
+	for _, volume := range backups {
+		tags := map[string]string{
+			"backup":     backup.Name,
+			"ns":         pod.Namespace,
+			"pod":        pod.Name,
+			"volume":     volume,
+			"backup-uid": string(backup.UID),
+			"pod-uid":    string(pod.UID),
+		}
+
+		var tagsFlags []string
+		for k, v := range tags {
+			tagsFlags = append(tagsFlags, fmt.Sprintf("--tag=%s=%s", k, v))
+		}
+
+		// hardcoded to daemonset for now
+		resticDeploymentMode := "daemonset"
+
+		switch resticDeploymentMode {
+		case "daemonset":
+			// find the DS pod running on the node
+			dsPods, err := ib.podClient.List(metav1.ListOptions{LabelSelector: "name=ark-daemon"})
+			if err != nil {
+				return errors.WithStack(err)
+			}
+
+			var dsPod *apiv1.Pod
+			for _, itm := range dsPods.Items {
+				if itm.Spec.NodeName == pod.Spec.NodeName {
+					dsPod = &itm
+					break
+				}
+			}
+
+			if dsPod == nil {
+				errs = append(errs, errors.Errorf("unable to find ark daemonset pod for node %q", pod.Spec.NodeName))
+				continue
+			}
+
+			var (
+				mountingContainer   string
+				mountingContainerID string
+				mountPath           string
+			)
+
+			// find a container in the pod that has a volumeMount for the target volume
+			for _, container := range pod.Spec.Containers {
+				for _, volMount := range container.VolumeMounts {
+					if volMount.Name == volume {
+						mountingContainer = container.Name
+						mountPath = volMount.MountPath
+						break
+					}
+				}
+			}
+
+			if mountingContainer == "" {
+				errs = append(errs, errors.Errorf("unable to find container with volumeMount for volume %q", volume))
+				continue
+			}
+
+			// find the containerID for the container
+			for _, status := range pod.Status.ContainerStatuses {
+				if status.Name == mountingContainer {
+					mountingContainerID = strings.Replace(pod.Status.ContainerStatuses[0].ContainerID, "docker://", "", -1)
+					break
+				}
+			}
+
+			if mountingContainerID == "" {
+				errs = append(errs, errors.Errorf("unable to get containerID for container %q", mountingContainer))
+				continue
+			}
+
+			dsCmd := &api.ExecHook{
+				Container: "restic",
+				Command:   []string{"/run-backup.sh", mountingContainerID, mountPath, strings.Join(tagsFlags, " ")},
+				OnError:   api.HookErrorModeFail,
+				Timeout:   metav1.Duration{Duration: time.Minute},
+			}
+
+			dsPodUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&dsPod)
+			if err != nil {
+				return err
+			}
+
+			if err := ib.podCommandExecutor.executePodCommand(
+				log,
+				dsPodUnstructured,
+				dsPod.Namespace,
+				dsPod.Name,
+				"restic-backup",
+				dsCmd); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		case "sidecar":
+			// TODO generate a temporary repo key (probably want to do this higher up in the call stack
+			// when implementing for real)
+			// TODO defer-revoke the key
+
+			// TODO pass it as part of the exec hook (probably need to create a run-sidecar-backup.sh
+			// to do this since it needs to be in an env var or file)
+
+			sidecarCmd := &api.ExecHook{
+				Container: "restic",
+				Command:   []string{"/sidecar-run-backup.sh", "rest:http://rclone.heptio-ark:8080", "passw0rd", "/" + volume, strings.Join(tagsFlags, " ")},
+				OnError:   api.HookErrorModeFail,
+				Timeout:   metav1.Duration{Duration: time.Minute},
+			}
+
+			if err := ib.podCommandExecutor.executePodCommand(
+				log,
+				unstructuredPod.UnstructuredContent(),
+				pod.Namespace,
+				pod.Name,
+				"restic-backup",
+				sidecarCmd); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		default:
+			return errors.New("unsupported restic config")
+		}
+
+		snapshotID, err := getSnapshotID(string(backup.UID), pod.Namespace, string(pod.UID), volume, log)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		podAnnotations["snapshot.ark.heptio.com/"+volume] = snapshotID
+	}
+
+	metadata.SetAnnotations(podAnnotations)
+
+	return kubeerrs.NewAggregate(errs)
+}
+
+func getSnapshotID(backupUID, namespace, podUID, volume string, log logrus.FieldLogger) (string, error) {
+	cmd := exec.Command("/restic", "snapshots", "--json", "--last")
+
+	tagFilters := []string{
+		"ns=" + namespace,
+		"pod-uid=" + podUID,
+		"volume=" + volume,
+		"backup-uid=" + backupUID,
+	}
+
+	cmd.Args = append(cmd.Args, "--tag="+strings.Join(tagFilters, ","))
+
+	log.Infof("Running get snapshot cmd %v", cmd.Args)
+
+	res, err := cmd.Output()
+	if err != nil {
+		return "", errors.Wrap(err, "error running restic snapshots cmd")
+	}
+
+	type jsonArray []map[string]interface{}
+
+	var snapshots jsonArray
+
+	if err := json.Unmarshal(res, &snapshots); err != nil {
+		return "", errors.Wrap(err, "error unmarshalling restic snapshots result")
+	}
+
+	if len(snapshots) != 1 {
+		return "", errors.Errorf("expected one matching snapshot, got %d", len(snapshots))
+	}
+
+	return snapshots[0]["short_id"].(string), nil
 }
 
 // zoneLabel is the label that stores availability-zone info

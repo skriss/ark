@@ -29,7 +29,7 @@ spec:
       serviceAccountName: ark
       containers:
         - name: ark
-          image: gcr.io/heptio-images/ark:latest
+          image: gcr.io/steve-heptio/ark:restic
           command:
             - /ark
           args:
@@ -42,6 +42,26 @@ spec:
           env:
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: /credentials/cloud
+            - name: RESTIC_REPOSITORY
+              valueFrom:
+                secretKeyRef:
+                  name: restic-credentials
+                  key: RESTIC_REPOSITORY
+            - name: RESTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: restic-credentials
+                  key: RESTIC_PASSWORD
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: restic-credentials
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: restic-credentials
+                  key: AWS_SECRET_ACCESS_KEY
       volumes:
         - name: cloud-credentials
           secret:

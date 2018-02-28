@@ -554,10 +554,10 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 			continue
 		}
 
-		if hasControllerOwner(obj.GetOwnerReferences()) {
-			ctx.infof("%s/%s has a controller owner - skipping", obj.GetNamespace(), obj.GetName())
-			continue
-		}
+		// if hasControllerOwner(obj.GetOwnerReferences()) {
+		// 	ctx.infof("%s/%s has a controller owner - skipping", obj.GetNamespace(), obj.GetName())
+		// 	continue
+		// }
 
 		if resourceClient == nil {
 			// initialize client for this Resource. we need

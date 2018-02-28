@@ -20,6 +20,6 @@ RUN apk add --no-cache ca-certificates
 
 ADD /bin/linux/amd64/ark /ark
 
-USER nobody:nobody
+ADD /restic /restic
 
 ENTRYPOINT ["/ark"]

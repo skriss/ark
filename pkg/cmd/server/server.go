@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"os/exec"
 	"reflect"
 	"sort"
 	"strings"
@@ -245,6 +246,10 @@ func (s *server) run() error {
 		return err
 	}
 
+	if err := s.initResticRepository(config); err != nil {
+		return err
+	}
+
 	if err := s.runControllers(config); err != nil {
 		return err
 	}
@@ -308,6 +313,7 @@ var defaultResourcePriorities = []string{
 	"configmaps",
 	"serviceaccounts",
 	"limitranges",
+	"pods",
 }
 
 func applyConfigDefaults(c *api.Config, logger logrus.FieldLogger) {
@@ -431,6 +437,28 @@ func durationMin(a, b time.Duration) time.Duration {
 	return b
 }
 
+func (s *server) initResticRepository(config *api.Config) error {
+	s.logger.Info("Ensuring restic repository")
+
+	output, err := exec.Command("/restic", "check").Output()
+	if err == nil {
+		s.logger.Infof("restic check successful: %s", output)
+		return nil
+	}
+	s.logger.Info("restic check returned an error: %s", err)
+
+	s.logger.Info("restic check output: %s", output)
+
+	s.logger.Info("Attempting to initialize restic repository")
+	output, err = exec.Command("/restic", "init").Output()
+	if err != nil {
+		return errors.Wrapf(err, "error initializing restic repository: %s", output)
+	}
+	s.logger.Infof("Restic repository initialized: %s", output)
+
+	return nil
+}
+
 func (s *server) runControllers(config *api.Config) error {
 	s.logger.Info("Starting controllers")
 
@@ -478,7 +506,7 @@ func (s *server) runControllers(config *api.Config) error {
 	} else {
 		backupTracker := controller.NewBackupTracker()
 
-		backupper, err := newBackupper(discoveryHelper, s.clientPool, s.backupService, s.snapshotService, s.kubeClientConfig, s.kubeClient.CoreV1())
+		backupper, err := newBackupper(discoveryHelper, s.clientPool, s.backupService, s.snapshotService, s.kubeClientConfig, s.kubeClient.CoreV1(), s.namespace)
 		cmd.CheckError(err)
 		backupController := controller.NewBackupController(
 			s.sharedInformerFactory.Ark().V1().Backups(),
@@ -651,12 +679,14 @@ func newBackupper(
 	snapshotService cloudprovider.SnapshotService,
 	kubeClientConfig *rest.Config,
 	kubeCoreV1Client kcorev1client.CoreV1Interface,
+	namespace string,
 ) (backup.Backupper, error) {
 	return backup.NewKubernetesBackupper(
 		discoveryHelper,
 		client.NewDynamicFactory(clientPool),
 		backup.NewPodCommandExecutor(kubeClientConfig, kubeCoreV1Client.RESTClient()),
 		snapshotService,
+		kubeCoreV1Client.Pods(namespace),
 	)
 }
 

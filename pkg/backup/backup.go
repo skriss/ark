@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kuberrs "k8s.io/apimachinery/pkg/util/errors"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/client"
@@ -53,6 +54,7 @@ type kubernetesBackupper struct {
 	podCommandExecutor    podCommandExecutor
 	groupBackupperFactory groupBackupperFactory
 	snapshotService       cloudprovider.SnapshotService
+	podClient             v1.PodInterface
 }
 
 type itemKey struct {
@@ -79,6 +81,7 @@ func NewKubernetesBackupper(
 	dynamicFactory client.DynamicFactory,
 	podCommandExecutor podCommandExecutor,
 	snapshotService cloudprovider.SnapshotService,
+	podClient v1.PodInterface,
 ) (Backupper, error) {
 	return &kubernetesBackupper{
 		discoveryHelper:       discoveryHelper,
@@ -86,6 +89,7 @@ func NewKubernetesBackupper(
 		podCommandExecutor:    podCommandExecutor,
 		groupBackupperFactory: &defaultGroupBackupperFactory{},
 		snapshotService:       snapshotService,
+		podClient:             podClient,
 	}, nil
 }
 
@@ -256,6 +260,7 @@ func (kb *kubernetesBackupper) Backup(backup *api.Backup, backupFile, logFile io
 		tw,
 		resourceHooks,
 		kb.snapshotService,
+		kb.podClient,
 	)
 
 	for _, group := range kb.discoveryHelper.Resources() {

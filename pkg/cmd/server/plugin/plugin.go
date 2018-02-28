@@ -51,9 +51,10 @@ func NewCommand() *cobra.Command {
 	}
 
 	restoreItemActions := map[string]restore.ItemAction{
-		"job": restore.NewJobAction(logger),
-		"pod": restore.NewPodAction(logger),
-		"svc": restore.NewServiceAction(logger),
+		"job":      restore.NewJobAction(logger),
+		"pod":      restore.NewPodAction(logger),
+		"svc":      restore.NewServiceAction(logger),
+		"snapshot": restore.NewAddResticInitContainerAction(logger),
 	}
 
 	c := &cobra.Command{

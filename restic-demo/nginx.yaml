@@ -1,0 +1,30 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: nginx
+  labels:
+    app: nginx
+  annotations:
+    backup.ark.heptio.com/backup-volumes: '["nginx-logs"]'
+spec:
+  volumes:
+    - name: nginx-logs
+      emptyDir: {}
+  containers:
+    - image: nginx:1.7.9
+      name: nginx
+      ports:
+        - containerPort: 80
+      volumeMounts:
+        - name: nginx-logs
+          mountPath: /var/log/nginx
