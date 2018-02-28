@@ -1,4 +1,4 @@
-# Copyright 2017 the Heptio Ark contributors.
+# Copyright 2018 the Heptio Ark contributors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,14 +14,11 @@
 
 FROM alpine:3.7
 
-MAINTAINER Andy Goldstein <andy@heptio.com>
-
 RUN apk add --no-cache ca-certificates
 
-ADD /bin/linux/amd64/ark /ark
+ADD restic .
 
-ADD /restic /restic
+ADD restic-wrapper .
 
-USER nobody:nobody
+ENTRYPOINT ["/bin/ash", "-c", "while true; do sleep 1; done"]
 
-ENTRYPOINT ["/ark"]

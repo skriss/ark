@@ -19,71 +19,57 @@ package backup
 import (
 	"archive/tar"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"github.com/heptio/ark/pkg/kuberesource"
+	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	kuberrs "k8s.io/apimachinery/pkg/util/errors"
+	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/client"
 	"github.com/heptio/ark/pkg/cloudprovider"
 	"github.com/heptio/ark/pkg/discovery"
+	"github.com/heptio/ark/pkg/kuberesource"
+	"github.com/heptio/ark/pkg/restic"
 	"github.com/heptio/ark/pkg/util/collections"
 	"github.com/heptio/ark/pkg/util/logging"
 )
 
 type itemBackupperFactory interface {
-	newItemBackupper(
-		backup *api.Backup,
-		namespaces, resources *collections.IncludesExcludes,
-		backedUpItems map[itemKey]struct{},
-		actions []resolvedAction,
-		podCommandExecutor podCommandExecutor,
-		tarWriter tarWriter,
-		resourceHooks []resourceHook,
-		dynamicFactory client.DynamicFactory,
-		discoveryHelper discovery.Helper,
-		snapshotService cloudprovider.SnapshotService,
-	) ItemBackupper
+	newItemBackupper(ctx *backupContext, itemBackupperDependencies *itemBackupperDependencies) ItemBackupper
 }
 
 type defaultItemBackupperFactory struct{}
 
-func (f *defaultItemBackupperFactory) newItemBackupper(
-	backup *api.Backup,
-	namespaces, resources *collections.IncludesExcludes,
-	backedUpItems map[itemKey]struct{},
-	actions []resolvedAction,
-	podCommandExecutor podCommandExecutor,
-	tarWriter tarWriter,
-	resourceHooks []resourceHook,
-	dynamicFactory client.DynamicFactory,
-	discoveryHelper discovery.Helper,
-	snapshotService cloudprovider.SnapshotService,
-) ItemBackupper {
+func (f *defaultItemBackupperFactory) newItemBackupper(ctx *backupContext, deps *itemBackupperDependencies) ItemBackupper {
 	ib := &defaultItemBackupper{
-		backup:          backup,
-		namespaces:      namespaces,
-		resources:       resources,
-		backedUpItems:   backedUpItems,
-		actions:         actions,
-		tarWriter:       tarWriter,
-		resourceHooks:   resourceHooks,
-		dynamicFactory:  dynamicFactory,
-		discoveryHelper: discoveryHelper,
-		snapshotService: snapshotService,
+		backup:          ctx.backup,
+		namespaces:      ctx.namespaces,
+		resources:       ctx.resources,
+		backedUpItems:   ctx.backedUpItems,
+		actions:         ctx.actions,
+		tarWriter:       ctx.tarWriter,
+		resourceHooks:   ctx.resourceHooks,
+		dynamicFactory:  deps.dynamicFactory,
+		discoveryHelper: deps.discoveryHelper,
+		snapshotService: deps.snapshotService,
 		itemHookHandler: &defaultItemHookHandler{
-			podCommandExecutor: podCommandExecutor,
+			podCommandExecutor: deps.podCommandExecutor,
 		},
+		podCommandExecutor: deps.podCommandExecutor,
+		podClient:          deps.podClient,
+		pvcGetter:          deps.pvcGetter,
+		resticMgr:          deps.resticMgr,
 	}
 
 	// this is for testing purposes
@@ -92,24 +78,48 @@ func (f *defaultItemBackupperFactory) newItemBackupper(
 	return ib
 }
 
+type backupContext struct {
+	backup        *api.Backup
+	namespaces    *collections.IncludesExcludes
+	resources     *collections.IncludesExcludes
+	actions       []resolvedAction
+	resourceHooks []resourceHook
+	backedUpItems map[itemKey]struct{}
+	tarWriter     tarWriter
+}
+
+type itemBackupperDependencies struct {
+	cohabitatingResources map[string]*cohabitatingResource
+	dynamicFactory        client.DynamicFactory
+	discoveryHelper       discovery.Helper
+	snapshotService       cloudprovider.SnapshotService
+	podCommandExecutor    podCommandExecutor
+	podClient             v1.PodInterface
+	pvcGetter             v1.PersistentVolumeClaimsGetter
+	resticMgr             restic.RepositoryManager
+}
+
 type ItemBackupper interface {
 	backupItem(logger logrus.FieldLogger, obj runtime.Unstructured, groupResource schema.GroupResource) error
 }
 
 type defaultItemBackupper struct {
-	backup          *api.Backup
-	namespaces      *collections.IncludesExcludes
-	resources       *collections.IncludesExcludes
-	backedUpItems   map[itemKey]struct{}
-	actions         []resolvedAction
-	tarWriter       tarWriter
-	resourceHooks   []resourceHook
-	dynamicFactory  client.DynamicFactory
-	discoveryHelper discovery.Helper
-	snapshotService cloudprovider.SnapshotService
-
+	backup                  *api.Backup
+	namespaces              *collections.IncludesExcludes
+	resources               *collections.IncludesExcludes
+	backedUpItems           map[itemKey]struct{}
+	actions                 []resolvedAction
+	tarWriter               tarWriter
+	resourceHooks           []resourceHook
+	dynamicFactory          client.DynamicFactory
+	discoveryHelper         discovery.Helper
+	snapshotService         cloudprovider.SnapshotService
+	podCommandExecutor      podCommandExecutor
 	itemHookHandler         itemHookHandler
 	additionalItemBackupper ItemBackupper
+	podClient               v1.PodInterface
+	pvcGetter               v1.PersistentVolumeClaimsGetter
+	resticMgr               restic.RepositoryManager
 }
 
 // backupItem backs up an individual item to tarWriter. The item may be excluded based on the
@@ -189,7 +199,7 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 	}
 
 	if len(backupErrs) != 0 {
-		return kuberrs.NewAggregate(backupErrs)
+		return kubeerrs.NewAggregate(backupErrs)
 	}
 
 	var filePath string
@@ -280,6 +290,144 @@ func (ib *defaultItemBackupper) executeActions(log logrus.FieldLogger, obj runti
 	}
 
 	return nil
+}
+
+func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstructured, backup *api.Backup, log logrus.FieldLogger) error {
+	var pod apiv1.Pod
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPod.UnstructuredContent(), &pod); err != nil {
+		return err
+	}
+
+	backupsValue := pod.Annotations["backup.ark.heptio.com/backup-volumes"]
+	if backupsValue == "" {
+		return nil
+	}
+
+	var backups []string
+	// check for json array
+	if backupsValue[0] == '[' {
+		if err := json.Unmarshal([]byte(backupsValue), &backups); err != nil {
+			backups = []string{backupsValue}
+		}
+	} else {
+		backups = append(backups, backupsValue)
+	}
+
+	// have to modify the unstructured pod's annotations so it gets persisted to the backup
+	metadata, err := meta.Accessor(unstructuredPod)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
+	podAnnotations := metadata.GetAnnotations()
+
+	// check if the repo for this namespace exists and create it if not
+	exists, err := ib.resticMgr.RepositoryExists(pod.Namespace)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if err := ib.resticMgr.InitRepo(pod.Namespace); err != nil {
+			return err
+		}
+	}
+
+	var errs []error
+	for _, volumeName := range backups {
+		// ensure specified volume exists in pod
+		var volume *apiv1.Volume
+		for _, v := range pod.Spec.Volumes {
+			if v.Name == volumeName {
+				volume = &v
+				break
+			}
+		}
+
+		if volume == nil {
+			errs = append(errs, errors.Errorf("volume %s does not exist in pod %s", volumeName, pod.Name))
+			continue
+		}
+
+		tags := map[string]string{
+			"backup":     backup.Name,
+			"ns":         pod.Namespace,
+			"pod":        pod.Name,
+			"volume":     volumeName,
+			"backup-uid": string(backup.UID),
+			"pod-uid":    string(pod.UID),
+		}
+
+		var tagsFlags []string
+		for k, v := range tags {
+			tagsFlags = append(tagsFlags, fmt.Sprintf("--tag=%s=%s", k, v))
+		}
+
+		// find the DS pod running on the node
+		dsPods, err := ib.podClient.List(metav1.ListOptions{LabelSelector: "name=restic-daemon"})
+		if err != nil {
+			return errors.WithStack(err)
+		}
+
+		var dsPod *apiv1.Pod
+		for _, itm := range dsPods.Items {
+			if itm.Spec.NodeName == pod.Spec.NodeName {
+				dsPod = &itm
+				break
+			}
+		}
+
+		if dsPod == nil {
+			errs = append(errs, errors.Errorf("unable to find ark daemonset pod for node %q", pod.Spec.NodeName))
+			continue
+		}
+
+		var volumeDir string
+		if volume.VolumeSource.PersistentVolumeClaim == nil {
+			volumeDir = volume.Name
+		} else {
+			pvc, err := ib.pvcGetter.PersistentVolumeClaims(pod.Namespace).Get(volume.VolumeSource.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
+			if err != nil {
+				errs = append(errs, errors.Wrapf(err, "unable to get persistent volume claim %s", volume.VolumeSource.PersistentVolumeClaim.ClaimName))
+				continue
+			}
+			volumeDir = pvc.Spec.VolumeName
+		}
+
+		dsCmd := &api.ExecHook{
+			Container: "restic",
+			Command:   ib.resticMgr.BackupCommand(pod.Namespace, string(pod.UID), volumeDir, tagsFlags).Args,
+			OnError:   api.HookErrorModeFail,
+			Timeout:   metav1.Duration{Duration: time.Minute},
+		}
+
+		dsPodUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&dsPod)
+		if err != nil {
+			return err
+		}
+
+		if err := ib.podCommandExecutor.executePodCommand(
+			log,
+			dsPodUnstructured,
+			dsPod.Namespace,
+			dsPod.Name,
+			"restic-backup",
+			dsCmd); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		snapshotID, err := ib.resticMgr.GetSnapshotID(pod.Namespace, string(backup.UID), string(pod.UID), volumeName)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		podAnnotations["snapshot.ark.heptio.com/"+volumeName] = snapshotID
+	}
+
+	metadata.SetAnnotations(podAnnotations)
+
+	return kubeerrs.NewAggregate(errs)
 }
 
 // zoneLabel is the label that stores availability-zone info

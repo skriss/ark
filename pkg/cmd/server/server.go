@@ -30,7 +30,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/heptio/ark/pkg/buildinfo"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -51,6 +50,7 @@ import (
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/backup"
+	"github.com/heptio/ark/pkg/buildinfo"
 	"github.com/heptio/ark/pkg/client"
 	"github.com/heptio/ark/pkg/cloudprovider"
 	"github.com/heptio/ark/pkg/cmd"
@@ -61,6 +61,7 @@ import (
 	arkv1client "github.com/heptio/ark/pkg/generated/clientset/versioned/typed/ark/v1"
 	informers "github.com/heptio/ark/pkg/generated/informers/externalversions"
 	"github.com/heptio/ark/pkg/plugin"
+	"github.com/heptio/ark/pkg/restic"
 	"github.com/heptio/ark/pkg/restore"
 	"github.com/heptio/ark/pkg/util/kube"
 	"github.com/heptio/ark/pkg/util/logging"
@@ -172,6 +173,7 @@ type server struct {
 	kubeClientConfig      *rest.Config
 	kubeClient            kubernetes.Interface
 	arkClient             clientset.Interface
+	objectStore           cloudprovider.ObjectStore
 	backupService         cloudprovider.BackupService
 	snapshotService       cloudprovider.SnapshotService
 	discoveryClient       discovery.DiscoveryInterface
@@ -181,6 +183,7 @@ type server struct {
 	cancelFunc            context.CancelFunc
 	logger                logrus.FieldLogger
 	pluginManager         plugin.Manager
+	resticManager         restic.RepositoryManager
 }
 
 func newServer(namespace, baseName, pluginDir string, logger *logrus.Logger) (*server, error) {
@@ -251,6 +254,10 @@ func (s *server) run() error {
 		return err
 	}
 
+	if err := s.initResticManager(config); err != nil {
+		return err
+	}
+
 	if err := s.runControllers(config); err != nil {
 		return err
 	}
@@ -314,6 +321,7 @@ var defaultResourcePriorities = []string{
 	"configmaps",
 	"serviceaccounts",
 	"limitranges",
+	"pods",
 }
 
 func applyConfigDefaults(c *api.Config, logger logrus.FieldLogger) {
@@ -397,6 +405,7 @@ func (s *server) initBackupService(config *api.Config) error {
 		return err
 	}
 
+	s.objectStore = objectStore
 	s.backupService = cloudprovider.NewBackupService(objectStore, s.logger)
 	return nil
 }
@@ -457,6 +466,19 @@ func durationMin(a, b time.Duration) time.Duration {
 	return b
 }
 
+func (s *server) initResticManager(config *api.Config) error {
+	s.resticManager = restic.NewRepositoryManager(
+		s.objectStore,
+		restic.BackendType(config.BackupStorageProvider.Name),
+		"ark-restic-backups", // TODO need to get the restic bucket name from config somwehere
+		s.kubeClient.CoreV1().Secrets(s.namespace),
+		s.logger,
+	)
+
+	s.logger.Info("Checking restic repositories")
+	return s.resticManager.CheckAllRepos()
+}
+
 func (s *server) runControllers(config *api.Config) error {
 	s.logger.Info("Starting controllers")
 
@@ -505,7 +527,7 @@ func (s *server) runControllers(config *api.Config) error {
 	} else {
 		backupTracker := controller.NewBackupTracker()
 
-		backupper, err := newBackupper(discoveryHelper, s.clientPool, s.backupService, s.snapshotService, s.kubeClientConfig, s.kubeClient.CoreV1())
+		backupper, err := newBackupper(discoveryHelper, s.clientPool, s.backupService, s.snapshotService, s.kubeClientConfig, s.kubeClient.CoreV1(), s.namespace, s.resticManager)
 		cmd.CheckError(err)
 		backupController := controller.NewBackupController(
 			s.sharedInformerFactory.Ark().V1().Backups(),
@@ -678,12 +700,17 @@ func newBackupper(
 	snapshotService cloudprovider.SnapshotService,
 	kubeClientConfig *rest.Config,
 	kubeCoreV1Client kcorev1client.CoreV1Interface,
+	namespace string,
+	resticManager restic.RepositoryManager,
 ) (backup.Backupper, error) {
 	return backup.NewKubernetesBackupper(
 		discoveryHelper,
 		client.NewDynamicFactory(clientPool),
 		backup.NewPodCommandExecutor(kubeClientConfig, kubeCoreV1Client.RESTClient()),
 		snapshotService,
+		kubeCoreV1Client.Pods(namespace),
+		kubeCoreV1Client, // PersistentVolumeClaimsGetter
+		resticManager,
 	)
 }
 

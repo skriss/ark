@@ -29,11 +29,13 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kuberrs "k8s.io/apimachinery/pkg/util/errors"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/client"
 	"github.com/heptio/ark/pkg/cloudprovider"
 	"github.com/heptio/ark/pkg/discovery"
+	"github.com/heptio/ark/pkg/restic"
 	"github.com/heptio/ark/pkg/util/collections"
 	kubeutil "github.com/heptio/ark/pkg/util/kube"
 	"github.com/heptio/ark/pkg/util/logging"
@@ -53,6 +55,9 @@ type kubernetesBackupper struct {
 	podCommandExecutor    podCommandExecutor
 	groupBackupperFactory groupBackupperFactory
 	snapshotService       cloudprovider.SnapshotService
+	podClient             v1.PodInterface
+	pvcGetter             v1.PersistentVolumeClaimsGetter
+	resticMgr             restic.RepositoryManager
 }
 
 type itemKey struct {
@@ -89,6 +94,9 @@ func NewKubernetesBackupper(
 	dynamicFactory client.DynamicFactory,
 	podCommandExecutor podCommandExecutor,
 	snapshotService cloudprovider.SnapshotService,
+	podClient v1.PodInterface,
+	pvcGetter v1.PersistentVolumeClaimsGetter,
+	resticMgr restic.RepositoryManager,
 ) (Backupper, error) {
 	return &kubernetesBackupper{
 		discoveryHelper:       discoveryHelper,
@@ -96,6 +104,9 @@ func NewKubernetesBackupper(
 		podCommandExecutor:    podCommandExecutor,
 		groupBackupperFactory: &defaultGroupBackupperFactory{},
 		snapshotService:       snapshotService,
+		podClient:             podClient,
+		pvcGetter:             pvcGetter,
+		resticMgr:             resticMgr,
 	}, nil
 }
 
@@ -232,11 +243,6 @@ func (kb *kubernetesBackupper) Backup(backup *api.Backup, backupFile, logFile io
 		return err
 	}
 
-	var labelSelector string
-	if backup.Spec.LabelSelector != nil {
-		labelSelector = metav1.FormatLabelSelector(backup.Spec.LabelSelector)
-	}
-
 	backedUpItems := make(map[itemKey]struct{})
 	var errs []error
 
@@ -247,19 +253,25 @@ func (kb *kubernetesBackupper) Backup(backup *api.Backup, backupFile, logFile io
 
 	gb := kb.groupBackupperFactory.newGroupBackupper(
 		log,
-		backup,
-		namespaceIncludesExcludes,
-		resourceIncludesExcludes,
-		labelSelector,
-		kb.dynamicFactory,
-		kb.discoveryHelper,
-		backedUpItems,
-		cohabitatingResources(),
-		resolvedActions,
-		kb.podCommandExecutor,
-		tw,
-		resourceHooks,
-		kb.snapshotService,
+		&backupContext{
+			backup:        backup,
+			namespaces:    namespaceIncludesExcludes,
+			resources:     resourceIncludesExcludes,
+			backedUpItems: backedUpItems,
+			actions:       resolvedActions,
+			tarWriter:     tw,
+			resourceHooks: resourceHooks,
+		},
+		&itemBackupperDependencies{
+			cohabitatingResources: cohabitatingResources(),
+			dynamicFactory:        kb.dynamicFactory,
+			discoveryHelper:       kb.discoveryHelper,
+			snapshotService:       kb.snapshotService,
+			podCommandExecutor:    kb.podCommandExecutor,
+			podClient:             kb.podClient,
+			pvcGetter:             kb.pvcGetter,
+			resticMgr:             kb.resticMgr,
+		},
 	)
 
 	for _, group := range kb.discoveryHelper.Resources() {

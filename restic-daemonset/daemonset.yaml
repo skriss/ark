@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: 
+  name: restic-daemon
+  namespace: heptio-ark
+spec:
+  selector:
+    matchLabels:
+      name: restic-daemon
+  template:
+    metadata:
+      labels:
+        name: restic-daemon
+    spec:
+      serviceAccountName: ark
+      volumes:
+      - name: docker-socket
+        hostPath:
+          path: /var/run/docker.sock
+      - name: host-pods
+        hostPath:
+          path: /var/lib/kubelet/pods
+      - name: restic-credentials
+        secret:
+          secretName: restic-credentials  
+      containers:
+      - image: gcr.io/steve-heptio/restic:master
+        name: restic
+        ports:
+          - containerPort: 80
+        volumeMounts:
+          - name: docker-socket
+            mountPath: /var/run/docker.sock
+          - name: host-pods
+            mountPath: /host_pods
+          - name: restic-credentials
+            mountPath: /restic-credentials
+        env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: restic-credentials
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: restic-credentials
+              key: AWS_SECRET_ACCESS_KEY
+        - name: HEPTIO_ARK_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace

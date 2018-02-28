@@ -112,6 +112,7 @@ DOTFILE_IMAGE = $(subst :,_,$(subst /,_,$(IMAGE))-$(VERSION))
 
 container: verify test .container-$(DOTFILE_IMAGE) container-name
 .container-$(DOTFILE_IMAGE): _output/bin/$(GOOS)/$(GOARCH)/$(BIN) $(DOCKERFILE)
+	@cp restic-container/restic _output/
 	@cp $(DOCKERFILE) _output/.dockerfile-$(GOOS)-$(GOARCH)
 	@docker build -t $(IMAGE):$(VERSION) -f _output/.dockerfile-$(GOOS)-$(GOARCH) _output
 	@docker images -q $(IMAGE):$(VERSION) > $@
