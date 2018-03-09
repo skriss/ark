@@ -498,7 +498,7 @@ func (s *server) runControllers(config *api.Config) error {
 	if config.RestoreOnlyMode {
 		s.logger.Info("Restore only mode - not starting the backup, schedule or GC controllers")
 	} else {
-		backupper, err := newBackupper(discoveryHelper, s.clientPool, s.backupService, s.snapshotService, s.kubeClientConfig, s.kubeClient.CoreV1())
+		backupper, err := newBackupper(discoveryHelper, s.clientPool, s.backupService, s.snapshotService, s.kubeClientConfig, s.kubeClient.CoreV1(), s.namespace)
 		cmd.CheckError(err)
 		backupController := controller.NewBackupController(
 			s.sharedInformerFactory.Ark().V1().Backups(),
@@ -621,12 +621,14 @@ func newBackupper(
 	snapshotService cloudprovider.SnapshotService,
 	kubeClientConfig *rest.Config,
 	kubeCoreV1Client kcorev1client.CoreV1Interface,
+	namespace string,
 ) (backup.Backupper, error) {
 	return backup.NewKubernetesBackupper(
 		discoveryHelper,
 		client.NewDynamicFactory(clientPool),
 		backup.NewPodCommandExecutor(kubeClientConfig, kubeCoreV1Client.RESTClient()),
 		snapshotService,
+		kubeCoreV1Client.Pods("heptio-ark-server"),
 	)
 }
 

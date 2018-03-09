@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kuberrs "k8s.io/apimachinery/pkg/util/errors"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/client"
@@ -49,6 +50,7 @@ type groupBackupperFactory interface {
 		tarWriter tarWriter,
 		resourceHooks []resourceHook,
 		snapshotService cloudprovider.SnapshotService,
+		podClient corev1.PodInterface,
 	) groupBackupper
 }
 
@@ -68,6 +70,7 @@ func (f *defaultGroupBackupperFactory) newGroupBackupper(
 	tarWriter tarWriter,
 	resourceHooks []resourceHook,
 	snapshotService cloudprovider.SnapshotService,
+	podClient corev1.PodInterface,
 ) groupBackupper {
 	return &defaultGroupBackupper{
 		log:                      log,
@@ -85,6 +88,7 @@ func (f *defaultGroupBackupperFactory) newGroupBackupper(
 		resourceHooks:            resourceHooks,
 		snapshotService:          snapshotService,
 		resourceBackupperFactory: &defaultResourceBackupperFactory{},
+		podClient:                podClient,
 	}
 }
 
@@ -107,6 +111,7 @@ type defaultGroupBackupper struct {
 	resourceHooks            []resourceHook
 	snapshotService          cloudprovider.SnapshotService
 	resourceBackupperFactory resourceBackupperFactory
+	podClient                corev1.PodInterface
 }
 
 // backupGroup backs up a single API group.
@@ -129,6 +134,7 @@ func (gb *defaultGroupBackupper) backupGroup(group *metav1.APIResourceList) erro
 			gb.tarWriter,
 			gb.resourceHooks,
 			gb.snapshotService,
+			gb.podClient,
 		)
 	)
 

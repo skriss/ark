@@ -18,4 +18,8 @@ RUN apk add --no-cache ca-certificates
 
 ADD ./restic .
 
+ADD ./docker .
+
+ADD ./run-backup.sh .
+
 ENTRYPOINT ["/bin/ash", "-c", "while true; do sleep 3600; done"]

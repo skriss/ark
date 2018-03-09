@@ -28,12 +28,14 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
+	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/client"
@@ -55,6 +57,7 @@ type itemBackupperFactory interface {
 		dynamicFactory client.DynamicFactory,
 		discoveryHelper discovery.Helper,
 		snapshotService cloudprovider.SnapshotService,
+		podClient v1.PodInterface,
 	) ItemBackupper
 }
 
@@ -71,6 +74,7 @@ func (f *defaultItemBackupperFactory) newItemBackupper(
 	dynamicFactory client.DynamicFactory,
 	discoveryHelper discovery.Helper,
 	snapshotService cloudprovider.SnapshotService,
+	podClient v1.PodInterface,
 ) ItemBackupper {
 	ib := &defaultItemBackupper{
 		backup:          backup,
@@ -87,6 +91,7 @@ func (f *defaultItemBackupperFactory) newItemBackupper(
 			podCommandExecutor: podCommandExecutor,
 		},
 		podCommandExecutor: podCommandExecutor,
+		podClient:          podClient,
 	}
 
 	// this is for testing purposes
@@ -100,20 +105,20 @@ type ItemBackupper interface {
 }
 
 type defaultItemBackupper struct {
-	backup             *api.Backup
-	namespaces         *collections.IncludesExcludes
-	resources          *collections.IncludesExcludes
-	backedUpItems      map[itemKey]struct{}
-	actions            []resolvedAction
-	tarWriter          tarWriter
-	resourceHooks      []resourceHook
-	dynamicFactory     client.DynamicFactory
-	discoveryHelper    discovery.Helper
-	snapshotService    cloudprovider.SnapshotService
-	podCommandExecutor podCommandExecutor
-
+	backup                  *api.Backup
+	namespaces              *collections.IncludesExcludes
+	resources               *collections.IncludesExcludes
+	backedUpItems           map[itemKey]struct{}
+	actions                 []resolvedAction
+	tarWriter               tarWriter
+	resourceHooks           []resourceHook
+	dynamicFactory          client.DynamicFactory
+	discoveryHelper         discovery.Helper
+	snapshotService         cloudprovider.SnapshotService
+	podCommandExecutor      podCommandExecutor
 	itemHookHandler         itemHookHandler
 	additionalItemBackupper ItemBackupper
+	podClient               v1.PodInterface
 }
 
 var podsGroupResource = schema.GroupResource{Group: "", Resource: "pods"}
@@ -167,9 +172,6 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 	ib.backedUpItems[key] = struct{}{}
 
 	log.Info("Backing up resource")
-
-	// Never save status
-	delete(obj.UnstructuredContent(), "status")
 
 	log.Debug("Executing pre hooks")
 	if err := ib.itemHookHandler.handleHooks(log, groupResource, obj, ib.resourceHooks, hookPhasePre); err != nil {
@@ -250,6 +252,9 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 		return err
 	}
 
+	// Never save status
+	delete(obj.UnstructuredContent(), "status")
+
 	var filePath string
 	if namespace != "" {
 		filePath = filepath.Join(api.ResourcesDir, groupResource.String(), api.NamespaceScopedDir, namespace, name+".json")
@@ -302,8 +307,28 @@ func (ib *defaultItemBackupper) handleResticBackup(pod runtime.Unstructured, bac
 		backups = append(backups, backupsValue)
 	}
 
-	var errs []error
+	var structuredPod apiv1.Pod
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(pod.UnstructuredContent(), &structuredPod); err != nil {
+		return err
+	}
 
+	// find the DS pod running on the node
+	dsPods, err := ib.podClient.List(metav1.ListOptions{LabelSelector: "name=ark-daemon"})
+	if err != nil {
+		return err
+	}
+
+	var dsPod apiv1.Pod
+	for _, itm := range dsPods.Items {
+		if itm.Spec.NodeName == structuredPod.Spec.NodeName {
+			dsPod = itm
+			break
+		}
+	}
+
+	containerID := strings.Replace(structuredPod.Status.ContainerStatuses[0].ContainerID, "docker://", "", -1)
+
+	var errs []error
 	for _, volume := range backups {
 		tags := map[string]string{
 			"backup": backup.Name,
@@ -312,25 +337,41 @@ func (ib *defaultItemBackupper) handleResticBackup(pod runtime.Unstructured, bac
 			"volume": volume,
 		}
 
-		cmd := &api.ExecHook{
+		var tagsFlags []string
+		for k, v := range tags {
+			tagsFlags = append(tagsFlags, fmt.Sprintf("--tag=%s=%s", k, v))
+		}
+
+		dsCmd := &api.ExecHook{
 			Container: "restic",
-			Command:   getBackupCommand(volume, tags),
+			Command:   []string{"/run-backup.sh", containerID, structuredPod.Spec.Containers[0].VolumeMounts[0].MountPath, strings.Join(tagsFlags, " ")},
 			OnError:   api.HookErrorModeFail,
 			Timeout:   metav1.Duration{Duration: time.Minute},
 		}
 
-		if err := ib.podCommandExecutor.executePodCommand(log, pod.UnstructuredContent(), metadata.GetNamespace(), metadata.GetName(), "restic-backup", cmd); err != nil {
+		dsPodUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&dsPod)
+		if err != nil {
+			return err
+		}
+
+		if err := ib.podCommandExecutor.executePodCommand(
+			log,
+			dsPodUnstructured,
+			dsPod.Namespace,
+			dsPod.Name,
+			"restic-backup",
+			dsCmd); err != nil {
 			errs = append(errs, err)
 			continue
 		}
 
-		if snapshotID := getSnapshotID(backup.Name, metadata.GetNamespace(), metadata.GetName(), volume, log); snapshotID != "" {
-			annotations := metadata.GetAnnotations()
-
-			annotations["snapshot.ark.heptio.com/"+volume] = snapshotID
-
-			metadata.SetAnnotations(annotations)
+		snapshotID := getSnapshotID(backup.Name, metadata.GetNamespace(), metadata.GetName(), volume, log)
+		if snapshotID == "" {
+			errs = append(errs, errors.Errorf("could not get snapshot ID for volume %s", volume))
+			continue
 		}
+
+		metadata.GetAnnotations()["snapshot.ark.heptio.com/"+volume] = snapshotID
 	}
 
 	return kubeerrs.NewAggregate(errs)

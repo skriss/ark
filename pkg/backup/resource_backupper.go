@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kuberrs "k8s.io/apimachinery/pkg/util/errors"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 type resourceBackupperFactory interface {
@@ -48,6 +49,7 @@ type resourceBackupperFactory interface {
 		tarWriter tarWriter,
 		resourceHooks []resourceHook,
 		snapshotService cloudprovider.SnapshotService,
+		podClient v1.PodInterface,
 	) resourceBackupper
 }
 
@@ -68,6 +70,7 @@ func (f *defaultResourceBackupperFactory) newResourceBackupper(
 	tarWriter tarWriter,
 	resourceHooks []resourceHook,
 	snapshotService cloudprovider.SnapshotService,
+	podClient v1.PodInterface,
 ) resourceBackupper {
 	return &defaultResourceBackupper{
 		log:                   log,
@@ -85,6 +88,7 @@ func (f *defaultResourceBackupperFactory) newResourceBackupper(
 		resourceHooks:         resourceHooks,
 		snapshotService:       snapshotService,
 		itemBackupperFactory:  &defaultItemBackupperFactory{},
+		podClient:             podClient,
 	}
 }
 
@@ -108,6 +112,7 @@ type defaultResourceBackupper struct {
 	resourceHooks         []resourceHook
 	snapshotService       cloudprovider.SnapshotService
 	itemBackupperFactory  itemBackupperFactory
+	podClient             v1.PodInterface
 }
 
 // backupResource backs up all the objects for a given group-version-resource.
@@ -181,6 +186,7 @@ func (rb *defaultResourceBackupper) backupResource(
 		rb.dynamicFactory,
 		rb.discoveryHelper,
 		rb.snapshotService,
+		rb.podClient,
 	)
 
 	namespacesToList := getNamespacesToList(rb.namespaces)

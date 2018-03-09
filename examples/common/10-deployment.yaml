@@ -29,7 +29,7 @@ spec:
       serviceAccountName: ark
       containers:
         - name: ark
-          image: gcr.io/steve-heptio/ark:master
+          image: gcr.io/steve-heptio/ark:restic
           command:
             - /ark
           args:
