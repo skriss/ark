@@ -91,7 +91,52 @@ func (a *addResticInitContainerAction) Execute(item runtime.Unstructured, restor
 			Name:    "restic-init-" + volumeName,
 			Command: []string{"/restic"},
 			Args:    []string{"restore", "--target=/restores/", snapshotID},
-			Env:     []corev1.EnvVar{},
+			Env: []corev1.EnvVar{
+				{
+					Name: "RESTIC_REPOSITORY",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: "restic-credentials",
+							},
+							Key: "RESTIC_REPOSITORY",
+						},
+					},
+				},
+				{
+					Name: "RESTIC_PASSWORD",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: "restic-credentials",
+							},
+							Key: "RESTIC_PASSWORD",
+						},
+					},
+				},
+				{
+					Name: "AWS_ACCESS_KEY_ID",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: "restic-credentials",
+							},
+							Key: "AWS_ACCESS_KEY_ID",
+						},
+					},
+				},
+				{
+					Name: "AWS_SECRET_ACCESS_KEY",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: "restic-credentials",
+							},
+							Key: "AWS_SECRET_ACCESS_KEY",
+						},
+					},
+				},
+			},
 			VolumeMounts: []corev1.VolumeMount{
 				corev1.VolumeMount{
 					Name:      volumeName,
@@ -101,24 +146,24 @@ func (a *addResticInitContainerAction) Execute(item runtime.Unstructured, restor
 		}
 
 		// get restic config/creds off the sidecar (which we assume to be there since a backup was taken)
-		resticEnv := pod["spec"].(map[string]interface{})["containers"].([]interface{})[1].(map[string]interface{})["env"].([]interface{})
-		for _, obj := range resticEnv {
-			sourceVar := obj.(map[string]interface{})
+		// resticEnv := pod["spec"].(map[string]interface{})["containers"].([]interface{})[1].(map[string]interface{})["env"].([]interface{})
+		// for _, obj := range resticEnv {
+		// 	sourceVar := obj.(map[string]interface{})
 
-			envVar := corev1.EnvVar{
-				Name: sourceVar["name"].(string),
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: sourceVar["valueFrom"].(map[string]interface{})["secretKeyRef"].(map[string]interface{})["name"].(string),
-						},
-						Key: sourceVar["valueFrom"].(map[string]interface{})["secretKeyRef"].(map[string]interface{})["key"].(string),
-					},
-				},
-			}
+		// 	envVar := corev1.EnvVar{
+		// 		Name: sourceVar["name"].(string),
+		// 		ValueFrom: &corev1.EnvVarSource{
+		// 			SecretKeyRef: &corev1.SecretKeySelector{
+		// 				LocalObjectReference: corev1.LocalObjectReference{
+		// 					Name: sourceVar["valueFrom"].(map[string]interface{})["secretKeyRef"].(map[string]interface{})["name"].(string),
+		// 				},
+		// 				Key: sourceVar["valueFrom"].(map[string]interface{})["secretKeyRef"].(map[string]interface{})["key"].(string),
+		// 			},
+		// 		},
+		// 	}
 
-			initContainer.Env = append(initContainer.Env, envVar)
-		}
+		// 	initContainer.Env = append(initContainer.Env, envVar)
+		// }
 
 		initContainerJSON, err := json.Marshal(initContainer)
 		if err != nil {

@@ -371,7 +371,9 @@ func (ib *defaultItemBackupper) handleResticBackup(pod runtime.Unstructured, bac
 			continue
 		}
 
-		metadata.GetAnnotations()["snapshot.ark.heptio.com/"+volume] = snapshotID
+		annotations := metadata.GetAnnotations()
+		annotations["snapshot.ark.heptio.com/"+volume] = snapshotID
+		metadata.SetAnnotations(annotations)
 	}
 
 	return kubeerrs.NewAggregate(errs)
