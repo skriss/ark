@@ -258,11 +258,27 @@ func (s *server) run() error {
 		return err
 	}
 
+	s.runResticMaintenance()
+
 	if err := s.runControllers(config); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func (s *server) runResticMaintenance() {
+	go func() {
+		interval := time.Hour
+
+		<-time.After(interval)
+
+		wait.Forever(func() {
+			if err := s.resticManager.PruneAllRepos(); err != nil {
+				s.logger.WithError(err).Error("error pruning repos")
+			}
+		}, interval)
+	}()
 }
 
 func (s *server) ensureArkNamespace() error {

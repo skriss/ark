@@ -42,6 +42,7 @@ type RepositoryManager interface {
 	CheckRepo(name string) error
 	CheckAllRepos() error
 	PruneRepo(name string) error
+	PruneAllRepos() error
 
 	GetSnapshotID(repo, backupUID, podUID, volume string) (string, error)
 	Forget(repo, snapshotID string) error
@@ -207,6 +208,55 @@ func (rm *repositoryManager) CheckAllRepos() error {
 			errLock.Lock()
 			errors = append(errors, err)
 			errLock.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	return kerrs.NewAggregate(errors)
+}
+
+func (rm *repositoryManager) PruneAllRepos() error {
+	repos, err := rm.getAllRepos()
+	if err != nil {
+		return err
+	}
+
+	var (
+		errors  []error
+		wg      sync.WaitGroup
+		errLock sync.Mutex
+	)
+
+	for _, repo := range repos {
+		this := repo
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			rm.log.WithField("repo", this).Debugf("Pre-prune checking repo %s", this)
+			if err := rm.CheckRepo(this); err != nil {
+				errLock.Lock()
+				errors = append(errors, err)
+				errLock.Unlock()
+
+				return
+			}
+
+			rm.log.WithField("repo", this).Debugf("Pruning repo %s", this)
+			if err := rm.PruneRepo(this); err != nil {
+				errLock.Lock()
+				errors = append(errors, err)
+				errLock.Unlock()
+			}
+
+			rm.log.WithField("repo", this).Debugf("Post-prune checking repo %s", this)
+			if err := rm.CheckRepo(this); err != nil {
+				errLock.Lock()
+				errors = append(errors, err)
+				errLock.Unlock()
+			}
 		}()
 	}
 
