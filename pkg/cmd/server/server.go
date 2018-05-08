@@ -61,6 +61,7 @@ import (
 	arkv1client "github.com/heptio/ark/pkg/generated/clientset/versioned/typed/ark/v1"
 	informers "github.com/heptio/ark/pkg/generated/informers/externalversions"
 	"github.com/heptio/ark/pkg/plugin"
+	"github.com/heptio/ark/pkg/podexec"
 	"github.com/heptio/ark/pkg/restic"
 	"github.com/heptio/ark/pkg/restore"
 	"github.com/heptio/ark/pkg/util/kube"
@@ -723,7 +724,7 @@ func newBackupper(
 	return backup.NewKubernetesBackupper(
 		discoveryHelper,
 		client.NewDynamicFactory(clientPool),
-		backup.NewPodCommandExecutor(kubeClientConfig, kubeCoreV1Client.RESTClient()),
+		podexec.NewPodCommandExecutor(kubeClientConfig, kubeCoreV1Client.RESTClient()),
 		snapshotService,
 		kubeCoreV1Client.Pods(namespace),
 		kubeCoreV1Client, // PersistentVolumeClaimsGetter

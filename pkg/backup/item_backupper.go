@@ -40,6 +40,7 @@ import (
 	"github.com/heptio/ark/pkg/cloudprovider"
 	"github.com/heptio/ark/pkg/discovery"
 	"github.com/heptio/ark/pkg/kuberesource"
+	"github.com/heptio/ark/pkg/podexec"
 	"github.com/heptio/ark/pkg/restic"
 	"github.com/heptio/ark/pkg/util/collections"
 	"github.com/heptio/ark/pkg/util/logging"
@@ -93,7 +94,7 @@ type itemBackupperDependencies struct {
 	dynamicFactory        client.DynamicFactory
 	discoveryHelper       discovery.Helper
 	snapshotService       cloudprovider.SnapshotService
-	podCommandExecutor    podCommandExecutor
+	podCommandExecutor    podexec.PodCommandExecutor
 	podClient             v1.PodInterface
 	pvcGetter             v1.PersistentVolumeClaimsGetter
 	resticMgr             restic.RepositoryManager
@@ -114,7 +115,7 @@ type defaultItemBackupper struct {
 	dynamicFactory          client.DynamicFactory
 	discoveryHelper         discovery.Helper
 	snapshotService         cloudprovider.SnapshotService
-	podCommandExecutor      podCommandExecutor
+	podCommandExecutor      podexec.PodCommandExecutor
 	itemHookHandler         itemHookHandler
 	additionalItemBackupper ItemBackupper
 	podClient               v1.PodInterface
@@ -419,7 +420,7 @@ func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstr
 			return err
 		}
 
-		if err := ib.podCommandExecutor.executePodCommand(
+		if err := ib.podCommandExecutor.ExecutePodCommand(
 			log,
 			dsPodUnstructured,
 			dsPod.Namespace,

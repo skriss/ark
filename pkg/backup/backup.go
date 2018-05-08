@@ -35,6 +35,7 @@ import (
 	"github.com/heptio/ark/pkg/client"
 	"github.com/heptio/ark/pkg/cloudprovider"
 	"github.com/heptio/ark/pkg/discovery"
+	"github.com/heptio/ark/pkg/podexec"
 	"github.com/heptio/ark/pkg/restic"
 	"github.com/heptio/ark/pkg/util/collections"
 	kubeutil "github.com/heptio/ark/pkg/util/kube"
@@ -52,7 +53,7 @@ type Backupper interface {
 type kubernetesBackupper struct {
 	dynamicFactory        client.DynamicFactory
 	discoveryHelper       discovery.Helper
-	podCommandExecutor    podCommandExecutor
+	podCommandExecutor    podexec.PodCommandExecutor
 	groupBackupperFactory groupBackupperFactory
 	snapshotService       cloudprovider.SnapshotService
 	podClient             v1.PodInterface
@@ -92,7 +93,7 @@ func cohabitatingResources() map[string]*cohabitatingResource {
 func NewKubernetesBackupper(
 	discoveryHelper discovery.Helper,
 	dynamicFactory client.DynamicFactory,
-	podCommandExecutor podCommandExecutor,
+	podCommandExecutor podexec.PodCommandExecutor,
 	snapshotService cloudprovider.SnapshotService,
 	podClient v1.PodInterface,
 	pvcGetter v1.PersistentVolumeClaimsGetter,
