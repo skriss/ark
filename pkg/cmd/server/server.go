@@ -583,6 +583,7 @@ func (s *server) runControllers(config *api.Config) error {
 			s.sharedInformerFactory.Ark().V1().Restores(),
 			s.arkClient.ArkV1(), // restoreClient
 			backupTracker,
+			s.resticManager,
 		)
 		wg.Add(1)
 		go func() {

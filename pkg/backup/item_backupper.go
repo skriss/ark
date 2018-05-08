@@ -332,6 +332,20 @@ func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstr
 		}
 	}
 
+	// get annotations on backup
+	if backup.Annotations == nil {
+		backup.Annotations = make(map[string]string)
+	}
+
+	annotationVal, _ := backup.Annotations["backup.ark.heptio.com/restic-snapshots"]
+
+	var snapshots []string
+	if annotationVal != "" {
+		if err := json.Unmarshal([]byte(annotationVal), &snapshots); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+
 	var errs []error
 	for _, volumeName := range backups {
 		// ensure specified volume exists in pod
@@ -423,9 +437,18 @@ func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstr
 		}
 
 		podAnnotations["snapshot.ark.heptio.com/"+volumeName] = snapshotID
+
+		snapshots = append(snapshots, fmt.Sprintf("%s/%s", pod.Namespace, snapshotID))
 	}
 
 	metadata.SetAnnotations(podAnnotations)
+
+	jsonBytes, err := json.Marshal(snapshots)
+	if err != nil {
+		return err
+	}
+
+	backup.Annotations["backup.ark.heptio.com/restic-snapshots"] = string(jsonBytes)
 
 	return kubeerrs.NewAggregate(errs)
 }

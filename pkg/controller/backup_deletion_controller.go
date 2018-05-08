@@ -18,6 +18,7 @@ package controller
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	jsonpatch "github.com/evanphx/json-patch"
@@ -27,6 +28,7 @@ import (
 	arkv1client "github.com/heptio/ark/pkg/generated/clientset/versioned/typed/ark/v1"
 	informers "github.com/heptio/ark/pkg/generated/informers/externalversions/ark/v1"
 	listers "github.com/heptio/ark/pkg/generated/listers/ark/v1"
+	"github.com/heptio/ark/pkg/restic"
 	"github.com/heptio/ark/pkg/util/kube"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -50,6 +52,7 @@ type backupDeletionController struct {
 	restoreLister             listers.RestoreLister
 	restoreClient             arkv1client.RestoresGetter
 	backupTracker             BackupTracker
+	resticMgr                 restic.RepositoryManager
 
 	processRequestFunc func(*v1.DeleteBackupRequest) error
 	clock              clock.Clock
@@ -67,6 +70,7 @@ func NewBackupDeletionController(
 	restoreInformer informers.RestoreInformer,
 	restoreClient arkv1client.RestoresGetter,
 	backupTracker BackupTracker,
+	resticMgr restic.RepositoryManager,
 ) Interface {
 	c := &backupDeletionController{
 		genericController:         newGenericController("backup-deletion", logger),
@@ -79,6 +83,7 @@ func NewBackupDeletionController(
 		restoreLister:             restoreInformer.Lister(),
 		restoreClient:             restoreClient,
 		backupTracker:             backupTracker,
+		resticMgr:                 resticMgr,
 		clock:                     &clock.RealClock{},
 	}
 
@@ -222,6 +227,25 @@ func (c *backupDeletionController) processRequest(req *v1.DeleteBackupRequest) e
 		log.WithField("snapshotID", volumeBackup.SnapshotID).Info("Removing snapshot associated with backup")
 		if err := c.snapshotService.DeleteSnapshot(volumeBackup.SnapshotID); err != nil {
 			errs = append(errs, errors.Wrapf(err, "error deleting snapshot %s", volumeBackup.SnapshotID).Error())
+		}
+	}
+
+	log.Info("Removing restic snapshots")
+	if snapshotsJSON := backup.Annotations["backup.ark.heptio.com/restic-snapshots"]; snapshotsJSON != "" {
+		var snapshots []string
+		if err := json.Unmarshal([]byte(snapshotsJSON), &snapshots); err != nil {
+			errs = append(errs, errors.Wrap(err, "error unmarshalling backup.ark.heptio.com/restic-snapshots annotation value").Error())
+		} else {
+			for _, snapshot := range snapshots {
+				parts := strings.Split(snapshot, "/")
+				if len(parts) != 2 {
+					errs = append(errs, "error parsing restic snapshot identifier: invalid format")
+				}
+
+				if err := c.resticMgr.Forget(parts[0], parts[1]); err != nil {
+					errs = append(errs, err.Error())
+				}
+			}
 		}
 	}
 
