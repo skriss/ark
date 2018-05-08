@@ -71,6 +71,7 @@ func (f *defaultItemBackupperFactory) newItemBackupper(ctx *backupContext, deps 
 		podClient:          deps.podClient,
 		pvcGetter:          deps.pvcGetter,
 		resticMgr:          deps.resticMgr,
+		resticExecutor:     restic.NewDaemonSetExecutor(deps.podCommandExecutor, deps.podClient, deps.resticMgr.RepoPrefix()),
 	}
 
 	// this is for testing purposes
@@ -121,6 +122,7 @@ type defaultItemBackupper struct {
 	podClient               v1.PodInterface
 	pvcGetter               v1.PersistentVolumeClaimsGetter
 	resticMgr               restic.RepositoryManager
+	resticExecutor          restic.DaemonSetExecutor
 }
 
 // backupItem backs up an individual item to tarWriter. The item may be excluded based on the
@@ -377,25 +379,6 @@ func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstr
 			tagsFlags = append(tagsFlags, fmt.Sprintf("--tag=%s=%s", k, v))
 		}
 
-		// find the DS pod running on the node
-		dsPods, err := ib.podClient.List(metav1.ListOptions{LabelSelector: "name=restic-daemon"})
-		if err != nil {
-			return errors.WithStack(err)
-		}
-
-		var dsPod *apiv1.Pod
-		for _, itm := range dsPods.Items {
-			if itm.Spec.NodeName == pod.Spec.NodeName {
-				dsPod = &itm
-				break
-			}
-		}
-
-		if dsPod == nil {
-			errs = append(errs, errors.Errorf("unable to find ark daemonset pod for node %q", pod.Spec.NodeName))
-			continue
-		}
-
 		var volumeDir string
 		if volume.VolumeSource.PersistentVolumeClaim == nil {
 			volumeDir = volume.Name
@@ -408,25 +391,7 @@ func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstr
 			volumeDir = pvc.Spec.VolumeName
 		}
 
-		dsCmd := &api.ExecHook{
-			Container: "restic",
-			Command:   ib.resticMgr.BackupCommand(pod.Namespace, string(pod.UID), volumeDir, tagsFlags).Args,
-			OnError:   api.HookErrorModeFail,
-			Timeout:   metav1.Duration{Duration: time.Minute},
-		}
-
-		dsPodUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&dsPod)
-		if err != nil {
-			return err
-		}
-
-		if err := ib.podCommandExecutor.ExecutePodCommand(
-			log,
-			dsPodUnstructured,
-			dsPod.Namespace,
-			dsPod.Name,
-			"restic-backup",
-			dsCmd); err != nil {
+		if err := ib.resticExecutor.ExecBackup(pod.Spec.NodeName, pod.Namespace, string(pod.UID), volumeDir, tagsFlags, time.Minute, log); err != nil {
 			errs = append(errs, err)
 			continue
 		}

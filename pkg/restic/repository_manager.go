@@ -19,8 +19,6 @@ package restic
 import (
 	"crypto/rand"
 	"encoding/json"
-	"fmt"
-	"os/exec"
 	"strings"
 	"sync"
 
@@ -37,6 +35,7 @@ import (
 )
 
 type RepositoryManager interface {
+	RepoPrefix() string
 	RepositoryExists(name string) (bool, error)
 	InitRepo(name string) error
 	CheckRepo(name string) error
@@ -46,17 +45,15 @@ type RepositoryManager interface {
 
 	GetSnapshotID(repo, backupUID, podUID, volume string) (string, error)
 	Forget(repo, snapshotID string) error
-
-	BackupCommand(repo, podUID, volumePath string, tagFlags []string) *exec.Cmd
 }
 
 type repositoryManager struct {
-	objectStore         cloudprovider.ObjectStore
-	backendType         BackendType
-	bucket              string
-	secretsClient       v1.SecretInterface
-	log                 logrus.FieldLogger
-	repoIdentiferFormat string
+	objectStore   cloudprovider.ObjectStore
+	backendType   BackendType
+	bucket        string
+	secretsClient v1.SecretInterface
+	log           logrus.FieldLogger
+	repoPrefix    string
 }
 
 type BackendType string
@@ -84,14 +81,18 @@ func NewRepositoryManager(objectStore cloudprovider.ObjectStore, backendType Bac
 
 	switch rm.backendType {
 	case AWSBackend:
-		rm.repoIdentiferFormat = "s3:s3.amazonaws.com/" + rm.bucket + "/%s"
+		rm.repoPrefix = "s3:s3.amazonaws.com/" + rm.bucket
 	case AzureBackend:
-		rm.repoIdentiferFormat = "azure:" + rm.bucket + ":/%s"
+		rm.repoPrefix = "azure:" + rm.bucket + ":"
 	case GCPBackend:
-		rm.repoIdentiferFormat = "gs:" + rm.bucket + ":/%s"
+		rm.repoPrefix = "gs:" + rm.bucket + ":"
 	}
 
 	return rm
+}
+
+func (rm *repositoryManager) RepoPrefix() string {
+	return rm.repoPrefix
 }
 
 func (rm *repositoryManager) RepositoryExists(name string) (bool, error) {
@@ -156,9 +157,10 @@ func (rm *repositoryManager) InitRepo(name string) error {
 	}
 
 	// init the repo
-	_, err = newCommandBuilder(rm.repoIdentiferFormat, rm.secretsClient).
+	_, err = newCommandBuilder(rm.repoPrefix).
 		WithCommand("init").
 		WithRepo(name).
+		WithEnsureCredsFile(rm.secretsClient).
 		RunAndLog(rm.log)
 
 	return errors.WithStack(err)
@@ -268,38 +270,23 @@ func (rm *repositoryManager) PruneAllRepos() error {
 func (rm *repositoryManager) CheckRepo(name string) error {
 	rm.log.Debugf("checking repository %s", name)
 
-	_, err := newCommandBuilder(rm.repoIdentiferFormat, rm.secretsClient).
+	_, err := newCommandBuilder(rm.repoPrefix).
 		WithCommand("check").
 		WithRepo(name).
+		WithEnsureCredsFile(rm.secretsClient).
 		RunAndLog(rm.log)
 
 	return errors.WithStack(err)
 }
 
 func (rm *repositoryManager) PruneRepo(name string) error {
-	_, err := newCommandBuilder(rm.repoIdentiferFormat, rm.secretsClient).
+	_, err := newCommandBuilder(rm.repoPrefix).
 		WithCommand("prune").
 		WithRepo(name).
+		WithEnsureCredsFile(rm.secretsClient).
 		RunAndLog(rm.log)
 
 	return errors.WithStack(err)
-}
-
-func (rm *repositoryManager) BackupCommand(repo, podUID, volumeDir string, tagFlags []string) *exec.Cmd {
-	cmd := newCommandBuilder(rm.repoIdentiferFormat, rm.secretsClient).
-		WithBaseName("/restic-wrapper").
-		WithCommand("backup").
-		WithRepo(repo).
-		// explicitly passing the path here because this command is not being
-		// executed in this pod thus we don't want to create a temp file with
-		// the creds here if the secret mount isn't there yet.
-		WithPasswordFile(fmt.Sprintf(credsFilePath, repo)).
-		WithArgs(fmt.Sprintf("/host_pods/%s/volumes/*/%s", podUID, volumeDir)).
-		WithArgs(tagFlags...).
-		Command()
-
-	// need to exec within a shell since we're using a wildcard in the backup path
-	return exec.Command("/bin/sh", "-c", strings.Join(cmd.cmd.Args, " "))
 }
 
 func (rm *repositoryManager) GetSnapshotID(repo, backupUID, podUID, volume string) (string, error) {
@@ -310,11 +297,12 @@ func (rm *repositoryManager) GetSnapshotID(repo, backupUID, podUID, volume strin
 		"backup-uid=" + backupUID,
 	}
 
-	res, err := newCommandBuilder(rm.repoIdentiferFormat, rm.secretsClient).
+	res, err := newCommandBuilder(rm.repoPrefix).
 		WithCommand("snapshots").
 		WithRepo(repo).
 		WithArgs("--json", "--last").
 		WithArgs("--tag=" + strings.Join(tagFilters, ",")).
+		WithEnsureCredsFile(rm.secretsClient).
 		RunAndLog(rm.log)
 
 	if err != nil {
@@ -337,10 +325,11 @@ func (rm *repositoryManager) GetSnapshotID(repo, backupUID, podUID, volume strin
 }
 
 func (rm *repositoryManager) Forget(repo, snapshotID string) error {
-	_, err := newCommandBuilder(rm.repoIdentiferFormat, rm.secretsClient).
+	_, err := newCommandBuilder(rm.repoPrefix).
 		WithCommand("forget").
 		WithRepo(repo).
 		WithArgs(snapshotID).
+		WithEnsureCredsFile(rm.secretsClient).
 		RunAndLog(rm.log)
 
 	return errors.WithStack(err)

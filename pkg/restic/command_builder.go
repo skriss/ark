@@ -35,19 +35,15 @@ type commandBuilder struct {
 	repo         string
 	passwordFile string
 	args         []string
-
-	secretInterface  v1.SecretInterface
-	repoFormatString string
-
-	err error
-	cmd *exec.Cmd
+	repoPrefix   string
+	err          error
+	cmd          *exec.Cmd
 }
 
-func newCommandBuilder(repoFormatString string, secretInterface v1.SecretInterface) *commandBuilder {
+func newCommandBuilder(repoPrefix string) *commandBuilder {
 	return &commandBuilder{
-		baseName:         "/restic",
-		repoFormatString: repoFormatString,
-		secretInterface:  secretInterface,
+		baseName:   "/restic",
+		repoPrefix: repoPrefix,
 	}
 }
 
@@ -76,26 +72,31 @@ func (cb *commandBuilder) WithArgs(args ...string) *commandBuilder {
 	return cb
 }
 
-func (cb *commandBuilder) Command() *commandBuilder {
-	passwordFile := cb.passwordFile
-	var err error
-
-	if passwordFile == "" {
-		passwordFile, err = ensureCredsFile(cb.repo, cb.secretInterface)
-		if err != nil {
-			cb.err = err
-			return nil
-		}
+func (cb *commandBuilder) WithEnsureCredsFile(secretInterface v1.SecretInterface) *commandBuilder {
+	if cb.passwordFile != "" {
+		return cb
 	}
 
+	cb.passwordFile, cb.err = ensureCredsFile(cb.repo, secretInterface)
+	return cb
+}
+
+func (cb *commandBuilder) Command() *commandBuilder {
+	args := cb.Args()
+
+	cb.cmd = exec.Command(args[0], args[1:]...)
+	return cb
+}
+
+func (cb *commandBuilder) Args() []string {
 	args := append([]string{
+		cb.baseName,
 		cb.command,
-		"-r=" + fmt.Sprintf(cb.repoFormatString, cb.repo),
-		"-p=" + passwordFile,
+		fmt.Sprintf("-r=%s/%s", cb.repoPrefix, cb.repo),
+		fmt.Sprintf("-p=%s", cb.passwordFile),
 	}, cb.args...)
 
-	cb.cmd = exec.Command(cb.baseName, args...)
-	return cb
+	return args
 }
 
 func (cb *commandBuilder) Output() ([]byte, error) {
