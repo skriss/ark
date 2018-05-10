@@ -231,20 +231,18 @@ func (c *backupDeletionController) processRequest(req *v1.DeleteBackupRequest) e
 	}
 
 	log.Info("Removing restic snapshots")
-	if snapshotsJSON := backup.Annotations["backup.ark.heptio.com/restic-snapshots"]; snapshotsJSON != "" {
-		var snapshots []string
-		if err := json.Unmarshal([]byte(snapshotsJSON), &snapshots); err != nil {
-			errs = append(errs, errors.Wrap(err, "error unmarshalling backup.ark.heptio.com/restic-snapshots annotation value").Error())
-		} else {
-			for _, snapshot := range snapshots {
-				parts := strings.Split(snapshot, "/")
-				if len(parts) != 2 {
-					errs = append(errs, "error parsing restic snapshot identifier: invalid format")
-				}
+	snapshots, err := restic.GetSnapshotsInBackup(backup)
+	if err != nil {
+		errs = append(errs, err.Error())
+	} else {
+		for _, snapshot := range snapshots {
+			parts := strings.Split(snapshot, "/")
+			if len(parts) != 2 {
+				errs = append(errs, "error parsing restic snapshot identifier: invalid format")
+			}
 
-				if err := c.resticMgr.Forget(parts[0], parts[1]); err != nil {
-					errs = append(errs, err.Error())
-				}
+			if err := c.resticMgr.Forget(parts[0], parts[1]); err != nil {
+				errs = append(errs, err.Error())
 			}
 		}
 	}

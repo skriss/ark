@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
+	"github.com/heptio/ark/pkg/restic"
 	"github.com/heptio/ark/pkg/util/kube"
 )
 
@@ -54,25 +55,15 @@ func (a *resticRestoreAction) Execute(obj runtime.Unstructured, restore *api.Res
 
 	log := a.logger.WithField("pod", kube.NamespaceAndName(&pod))
 
-	// nil annotations: no restic snapshots, so return early
-	if pod.Annotations == nil {
-		log.Debug("No annotations found")
+	volumeSnapshots := restic.GetPodSnapshotAnnotations(&pod)
+	if len(volumeSnapshots) == 0 {
+		log.Debug("No restic snapshot ID annotations found")
 		return obj, nil, nil
 	}
 
-	for _, volume := range pod.Spec.Volumes {
-		log := log.WithField("volume", volume.Name)
+	log.Info("Restic snapshot ID annotations found")
 
-		var snapshotID string
-		if snapshotID = pod.Annotations["snapshot.ark.heptio.com/"+volume.Name]; snapshotID == "" {
-			log.Debug("No restic snapshot ID annotation found")
-			continue
-		}
-
-		log.Infof("Restic snapshot ID %s found", snapshotID)
-
-		// TODO init container
-	}
+	// TODO init container
 
 	return obj, nil, nil
 }

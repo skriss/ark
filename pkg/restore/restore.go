@@ -26,7 +26,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -563,10 +562,13 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 			continue
 		}
 
-		// TODO we only need to directly restore pods that have restic backups
-		if groupResource != kuberesource.Pods && hasControllerOwner(obj.GetOwnerReferences()) {
-			ctx.infof("%s/%s has a controller owner - skipping", obj.GetNamespace(), obj.GetName())
-			continue
+		if hasControllerOwner(obj.GetOwnerReferences()) {
+			// non-pods with controller owners shouldn't be restored; pods with controller
+			// owners should only be restored if they have restic snapshots to restore
+			if groupResource != kuberesource.Pods || !restic.PodHasSnapshotAnnotation(obj) {
+				ctx.infof("%s has a controller owner - skipping", kube.NamespaceAndName(obj))
+				continue
+			}
 		}
 
 		complete, err := isCompleted(obj, groupResource)
@@ -743,34 +745,25 @@ func restoreVolumes(daemonSetExecutor restic.DaemonSetExecutor, obj runtime.Unst
 		return
 	}
 
-	// TODO handle multiple volume snapshots per pod
+	for volumeName, snapshotID := range restic.GetPodSnapshotAnnotations(&pod) {
+		// TODO handle getting volumeDir for PVC's
 
-	var snapshotID, volumeName string
-	for k, v := range pod.Annotations {
-		if strings.HasPrefix(k, "snapshot.ark.heptio.com/") {
-			snapshotID = v
-			volumeName = k[len("snapshot.ark.heptio.com/"):]
-			break
+		err := daemonSetExecutor.ExecRestore(
+			pod.Spec.NodeName,
+			pod.Namespace,
+			string(pod.UID),
+			volumeName,
+			snapshotID,
+			nil,
+			time.Minute,
+			log,
+		)
+		if err != nil {
+			log.WithError(err).Error("error executing restore")
 		}
+
+		// TODO signal the pod that the restore is complete (annotation on Pod?)
 	}
-
-	// TODO handle getting volumeDir for PVC's
-
-	err := daemonSetExecutor.ExecRestore(
-		pod.Spec.NodeName,
-		pod.Namespace,
-		string(pod.UID),
-		volumeName,
-		snapshotID,
-		nil,
-		time.Minute,
-		log,
-	)
-	if err != nil {
-		log.WithError(err).Error("error executing restore")
-	}
-
-	// TODO signal the pod that the restore is complete (annotation on Pod?)
 }
 
 func (ctx *context) executePVAction(obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {

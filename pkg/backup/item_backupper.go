@@ -301,28 +301,13 @@ func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstr
 		return err
 	}
 
-	backupsValue := pod.Annotations["backup.ark.heptio.com/backup-volumes"]
-	if backupsValue == "" {
-		return nil
-	}
-
-	var backups []string
-	// check for json array
-	if backupsValue[0] == '[' {
-		if err := json.Unmarshal([]byte(backupsValue), &backups); err != nil {
-			backups = []string{backupsValue}
-		}
-	} else {
-		backups = append(backups, backupsValue)
-	}
+	backups := restic.GetVolumesToBackup(&pod)
 
 	// have to modify the unstructured pod's annotations so it gets persisted to the backup
 	metadata, err := meta.Accessor(unstructuredPod)
 	if err != nil {
 		return errors.WithStack(err)
 	}
-
-	podAnnotations := metadata.GetAnnotations()
 
 	// check if the repo for this namespace exists and create it if not
 	exists, err := ib.resticMgr.RepositoryExists(pod.Namespace)
@@ -340,13 +325,9 @@ func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstr
 		backup.Annotations = make(map[string]string)
 	}
 
-	annotationVal, _ := backup.Annotations["backup.ark.heptio.com/restic-snapshots"]
-
-	var snapshots []string
-	if annotationVal != "" {
-		if err := json.Unmarshal([]byte(annotationVal), &snapshots); err != nil {
-			return errors.WithStack(err)
-		}
+	snapshots, err := restic.GetSnapshotsInBackup(backup)
+	if err != nil {
+		return err
 	}
 
 	var errs []error
@@ -402,19 +383,14 @@ func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstr
 			continue
 		}
 
-		podAnnotations["snapshot.ark.heptio.com/"+volumeName] = snapshotID
+		restic.SetPodSnapshotAnnotation(metadata, volumeName, snapshotID)
 
 		snapshots = append(snapshots, fmt.Sprintf("%s/%s", pod.Namespace, snapshotID))
 	}
 
-	metadata.SetAnnotations(podAnnotations)
-
-	jsonBytes, err := json.Marshal(snapshots)
-	if err != nil {
+	if err := restic.SetSnapshotsInBackup(backup, snapshots); err != nil {
 		return err
 	}
-
-	backup.Annotations["backup.ark.heptio.com/restic-snapshots"] = string(jsonBytes)
 
 	return kubeerrs.NewAggregate(errs)
 }
