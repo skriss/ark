@@ -26,6 +26,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -47,6 +49,7 @@ import (
 	"github.com/heptio/ark/pkg/discovery"
 	arkv1client "github.com/heptio/ark/pkg/generated/clientset/versioned/typed/ark/v1"
 	"github.com/heptio/ark/pkg/kuberesource"
+	"github.com/heptio/ark/pkg/restic"
 	"github.com/heptio/ark/pkg/util/boolptr"
 	"github.com/heptio/ark/pkg/util/collections"
 	"github.com/heptio/ark/pkg/util/kube"
@@ -70,6 +73,7 @@ type kubernetesRestorer struct {
 	snapshotService    cloudprovider.SnapshotService
 	backupClient       arkv1client.BackupsGetter
 	namespaceClient    corev1.NamespaceInterface
+	daemonSetExecutor  restic.DaemonSetExecutor
 	resourcePriorities []string
 	fileSystem         FileSystem
 	logger             logrus.FieldLogger
@@ -142,6 +146,7 @@ func NewKubernetesRestorer(
 	resourcePriorities []string,
 	backupClient arkv1client.BackupsGetter,
 	namespaceClient corev1.NamespaceInterface,
+	daemonSetExecutor restic.DaemonSetExecutor,
 	logger logrus.FieldLogger,
 ) (Restorer, error) {
 	return &kubernetesRestorer{
@@ -151,6 +156,7 @@ func NewKubernetesRestorer(
 		snapshotService:    snapshotService,
 		backupClient:       backupClient,
 		namespaceClient:    namespaceClient,
+		daemonSetExecutor:  daemonSetExecutor,
 		resourcePriorities: resourcePriorities,
 		fileSystem:         &osFileSystem{},
 		logger:             logger,
@@ -207,6 +213,7 @@ func (kr *kubernetesRestorer) Restore(restore *api.Restore, backup *api.Backup, 
 		namespaceClient:      kr.namespaceClient,
 		actions:              resolvedActions,
 		snapshotService:      kr.snapshotService,
+		daemonSetExecutor:    kr.daemonSetExecutor,
 		waitForPVs:           true,
 	}
 
@@ -287,6 +294,7 @@ type context struct {
 	actions              []resolvedAction
 	snapshotService      cloudprovider.SnapshotService
 	waitForPVs           bool
+	daemonSetExecutor    restic.DaemonSetExecutor
 }
 
 func (ctx *context) infof(msg string, args ...interface{}) {
@@ -555,7 +563,8 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 			continue
 		}
 
-		if hasControllerOwner(obj.GetOwnerReferences()) {
+		// TODO we only need to directly restore pods that have restic backups
+		if groupResource != kuberesource.Pods && hasControllerOwner(obj.GetOwnerReferences()) {
 			ctx.infof("%s/%s has a controller owner - skipping", obj.GetNamespace(), obj.GetName())
 			continue
 		}
@@ -597,15 +606,29 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 			}
 			obj = updatedObj
 
-			// wait for the PV to be ready
-			if ctx.waitForPVs {
+			if ctx.waitForPVs && waiter == nil {
 				pvWatch, err := resourceClient.Watch(metav1.ListOptions{})
 				if err != nil {
 					addToResult(&errs, namespace, fmt.Errorf("error watching for namespace %q, resource %q: %v", namespace, &groupResource, err))
 					return warnings, errs
 				}
 
-				waiter = newResourceWaiter(pvWatch, isPVReady)
+				waiter = newResourceWaiter(pvWatch, isPVReady, func(_ runtime.Unstructured) { return }, ctx.logger)
+				defer waiter.Stop()
+			}
+		}
+
+		if groupResource == kuberesource.Pods {
+			if waiter == nil {
+				podWatch, err := resourceClient.Watch(metav1.ListOptions{})
+				if err != nil {
+					addToResult(&errs, namespace, fmt.Errorf("error watching for namespace %q, resource %q: %v", namespace, &groupResource, err))
+					return warnings, errs
+				}
+
+				waiter = newResourceWaiter(podWatch, isPodReady, func(obj runtime.Unstructured) {
+					restoreVolumes(ctx.daemonSetExecutor, obj, ctx.logger)
+				}, ctx.logger)
 				defer waiter.Stop()
 			}
 		}
@@ -681,7 +704,7 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 		}
 
 		if waiter != nil {
-			waiter.RegisterItem(obj.GetName())
+			waiter.RegisterItem(obj)
 		}
 	}
 
@@ -692,6 +715,62 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 	}
 
 	return warnings, errs
+}
+
+func isPodReady(obj runtime.Unstructured) bool {
+	var pod v1.Pod
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), &pod); err != nil {
+		return false
+	}
+
+	if pod.Status.Phase == v1.PodRunning {
+		return true
+	}
+
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.State.Running != nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+func restoreVolumes(daemonSetExecutor restic.DaemonSetExecutor, obj runtime.Unstructured, log logrus.FieldLogger) {
+	var pod v1.Pod
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), &pod); err != nil {
+		log.WithError(err).Error("error converting unstructured pod")
+		return
+	}
+
+	// TODO handle multiple volume snapshots per pod
+
+	var snapshotID, volumeName string
+	for k, v := range pod.Annotations {
+		if strings.HasPrefix(k, "snapshot.ark.heptio.com/") {
+			snapshotID = v
+			volumeName = k[len("snapshot.ark.heptio.com/"):]
+			break
+		}
+	}
+
+	// TODO handle getting volumeDir for PVC's
+
+	err := daemonSetExecutor.ExecRestore(
+		pod.Spec.NodeName,
+		pod.Namespace,
+		string(pod.UID),
+		volumeName,
+		snapshotID,
+		nil,
+		time.Minute,
+		log,
+	)
+	if err != nil {
+		log.WithError(err).Error("error executing restore")
+	}
+
+	// TODO signal the pod that the restore is complete (annotation on Pod?)
 }
 
 func (ctx *context) executePVAction(obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {

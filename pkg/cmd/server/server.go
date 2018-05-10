@@ -618,6 +618,11 @@ func (s *server) runControllers(config *api.Config) error {
 		config.ResourcePriorities,
 		s.arkClient.ArkV1(),
 		s.kubeClient,
+		restic.NewDaemonSetExecutor(
+			podexec.NewPodCommandExecutor(s.kubeClientConfig, s.kubeClient.CoreV1().RESTClient()),
+			s.kubeClient.CoreV1().Pods(s.namespace),
+			s.resticManager.RepoPrefix(),
+		),
 		s.logger,
 	)
 	cmd.CheckError(err)
@@ -740,6 +745,7 @@ func newRestorer(
 	resourcePriorities []string,
 	backupClient arkv1client.BackupsGetter,
 	kubeClient kubernetes.Interface,
+	daemonSetExecutor restic.DaemonSetExecutor,
 	logger logrus.FieldLogger,
 ) (restore.Restorer, error) {
 	return restore.NewKubernetesRestorer(
@@ -750,6 +756,7 @@ func newRestorer(
 		resourcePriorities,
 		backupClient,
 		kubeClient.CoreV1().Namespaces(),
+		daemonSetExecutor,
 		logger,
 	)
 }

@@ -105,16 +105,22 @@ func (dse *defaultDaemonSetExecutor) ExecRestore(nodeName, ns, podUID, volumeDir
 		WithRepo(ns).
 		WithPasswordFile(fmt.Sprintf(credsFilePath, ns)).
 		WithArgs(snapshotID).
-		WithArgs(fmt.Sprintf("-t=/host_pods/%s/volumes/*/%s", podUID, volumeDir)).
+		WithArgs(fmt.Sprintf("-t=/restores/%s", podUID)).
 		WithArgs(flags...)
 
-	// need to exec within a shell since we're using a wildcard in the backup path
-	cmd := exec.Command("/bin/sh", "-c", strings.Join(resticCmd.Args(), " "))
+	var (
+		moveCmd    = fmt.Sprintf("mv /restores/%s/host_pods/*/volumes/*/%s/* /host_pods/%s/volumes/*/%s", podUID, volumeDir, podUID, volumeDir)
+		cleanupCmd = fmt.Sprintf("rm -rf /restores/%s", podUID)
+	)
+
+	// need to exec within a shell since we're using a wildcard in the restore path
+	cmd := exec.Command("/bin/sh", "-c", strings.Join([]string{resticCmd.String(), moveCmd, cleanupCmd}, " && "))
 
 	return dse.Exec(nodeName, cmd.Args, timeout, log)
 }
 
 func (dse *defaultDaemonSetExecutor) getDaemonSetPod(node string) (*apiv1.Pod, error) {
+	// TODO we may want to cache this list
 	dsPods, err := dse.podClient.List(metav1.ListOptions{LabelSelector: "name=restic-daemon"})
 	if err != nil {
 		return nil, errors.WithStack(err)

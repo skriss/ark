@@ -21,6 +21,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -97,6 +98,10 @@ func (cb *commandBuilder) Args() []string {
 	}, cb.args...)
 
 	return args
+}
+
+func (cb *commandBuilder) String() string {
+	return strings.Join(cb.Args(), " ")
 }
 
 func (cb *commandBuilder) Output() ([]byte, error) {
