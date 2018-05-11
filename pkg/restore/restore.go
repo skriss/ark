@@ -629,7 +629,7 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 				}
 
 				waiter = newResourceWaiter(podWatch, isPodReady, func(obj runtime.Unstructured) {
-					restoreVolumes(ctx.daemonSetExecutor, obj, ctx.logger)
+					restoreVolumes(ctx.daemonSetExecutor, obj, string(ctx.restore.UID), ctx.logger)
 				}, ctx.logger)
 				defer waiter.Stop()
 			}
@@ -738,7 +738,7 @@ func isPodReady(obj runtime.Unstructured) bool {
 	return false
 }
 
-func restoreVolumes(daemonSetExecutor restic.DaemonSetExecutor, obj runtime.Unstructured, log logrus.FieldLogger) {
+func restoreVolumes(daemonSetExecutor restic.DaemonSetExecutor, obj runtime.Unstructured, restoreUID string, log logrus.FieldLogger) {
 	var pod v1.Pod
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), &pod); err != nil {
 		log.WithError(err).Error("error converting unstructured pod")
@@ -748,21 +748,19 @@ func restoreVolumes(daemonSetExecutor restic.DaemonSetExecutor, obj runtime.Unst
 	for volumeName, snapshotID := range restic.GetPodSnapshotAnnotations(&pod) {
 		// TODO handle getting volumeDir for PVC's
 
-		err := daemonSetExecutor.ExecRestore(
+		if err := daemonSetExecutor.ExecRestore(
 			pod.Spec.NodeName,
 			pod.Namespace,
 			string(pod.UID),
 			volumeName,
 			snapshotID,
+			restoreUID,
 			nil,
 			time.Minute,
 			log,
-		)
-		if err != nil {
-			log.WithError(err).Error("error executing restore")
+		); err != nil {
+			log.WithError(err).Error("error executing restic restore")
 		}
-
-		// TODO signal the pod that the restore is complete (annotation on Pod?)
 	}
 }
 

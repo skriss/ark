@@ -24,7 +24,7 @@ spec:
         secret:
           secretName: restic-credentials  
       containers:
-      - image: gcr.io/steve-heptio/restic:master
+      - image: gcr.io/steve-heptio/restic:latest
         name: restic
         ports:
           - containerPort: 80

@@ -21,6 +21,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
@@ -63,7 +64,48 @@ func (a *resticRestoreAction) Execute(obj runtime.Unstructured, restore *api.Res
 
 	log.Info("Restic snapshot ID annotations found")
 
-	// TODO init container
+	initContainer := corev1.Container{
+		Name:  "restic-wait",
+		Image: "gcr.io/steve-heptio/restic-init-container:latest",
+		Args:  []string{string(restore.UID)},
+		Env: []corev1.EnvVar{
+			{
+				Name: "POD_NAMESPACE",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.namespace",
+					},
+				},
+			},
+			{
+				Name: "POD_NAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.name",
+					},
+				},
+			},
+		},
+	}
 
-	return obj, nil, nil
+	for volumeName := range volumeSnapshots {
+		mount := corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: "/restores/" + volumeName,
+		}
+		initContainer.VolumeMounts = append(initContainer.VolumeMounts, mount)
+	}
+
+	if len(pod.Spec.InitContainers) == 0 || pod.Spec.InitContainers[0].Name != "restic-wait" {
+		pod.Spec.InitContainers = append([]corev1.Container{initContainer}, pod.Spec.InitContainers...)
+	} else {
+		pod.Spec.InitContainers[0] = initContainer
+	}
+
+	res, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&pod)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "unable to convert pod to runtime.Unstructured")
+	}
+
+	return &unstructured.Unstructured{Object: res}, nil, nil
 }

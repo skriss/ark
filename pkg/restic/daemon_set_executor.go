@@ -39,7 +39,7 @@ import (
 type DaemonSetExecutor interface {
 	Exec(nodeName string, cmd []string, timeout time.Duration, log logrus.FieldLogger) error
 	ExecBackup(nodeName, ns, podUID, volumeDir string, flags []string, timeout time.Duration, log logrus.FieldLogger) error
-	ExecRestore(nodeName, ns, podUID, volumeDir, snapshotID string, flags []string, timeout time.Duration, log logrus.FieldLogger) error
+	ExecRestore(nodeName, ns, podUID, volumeDir, snapshotID, restoreUID string, flags []string, timeout time.Duration, log logrus.FieldLogger) error
 }
 
 func NewDaemonSetExecutor(executor podexec.PodCommandExecutor, podClient v1.PodInterface, repoPrefix string) DaemonSetExecutor {
@@ -98,7 +98,7 @@ func (dse *defaultDaemonSetExecutor) ExecBackup(nodeName, ns, podUID, volumeDir 
 	return dse.Exec(nodeName, cmd.Args, timeout, log)
 }
 
-func (dse *defaultDaemonSetExecutor) ExecRestore(nodeName, ns, podUID, volumeDir, snapshotID string, flags []string, timeout time.Duration, log logrus.FieldLogger) error {
+func (dse *defaultDaemonSetExecutor) ExecRestore(nodeName, ns, podUID, volumeDir, snapshotID, restoreUID string, flags []string, timeout time.Duration, log logrus.FieldLogger) error {
 	resticCmd := newCommandBuilder(dse.repoPrefix).
 		WithBaseName("/restic-wrapper").
 		WithCommand("restore").
@@ -108,15 +108,11 @@ func (dse *defaultDaemonSetExecutor) ExecRestore(nodeName, ns, podUID, volumeDir
 		WithArgs(fmt.Sprintf("-t=/restores/%s", podUID)).
 		WithArgs(flags...)
 
-	var (
-		moveCmd    = fmt.Sprintf("mv /restores/%s/host_pods/*/volumes/*/%s/* /host_pods/%s/volumes/*/%s", podUID, volumeDir, podUID, volumeDir)
-		cleanupCmd = fmt.Sprintf("rm -rf /restores/%s", podUID)
-	)
+	if err := dse.Exec(nodeName, resticCmd.Args(), timeout, log); err != nil {
+		return err
+	}
 
-	// need to exec within a shell since we're using a wildcard in the restore path
-	cmd := exec.Command("/bin/sh", "-c", strings.Join([]string{resticCmd.String(), moveCmd, cleanupCmd}, " && "))
-
-	return dse.Exec(nodeName, cmd.Args, timeout, log)
+	return dse.Exec(nodeName, []string{"/run-restore.sh", podUID, volumeDir, restoreUID}, timeout, log)
 }
 
 func (dse *defaultDaemonSetExecutor) getDaemonSetPod(node string) (*apiv1.Pod, error) {

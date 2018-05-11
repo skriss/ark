@@ -14,13 +14,6 @@
 
 FROM alpine:3.7
 
-RUN apk add --no-cache ca-certificates
+ADD restic-init-container .
 
-ADD restic .
-
-ADD restic-wrapper .
-
-ADD run-restore.sh .
-
-ENTRYPOINT ["/bin/ash", "-c", "while true; do sleep 1; done"]
-
+ENTRYPOINT [ "/restic-init-container" ]
