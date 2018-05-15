@@ -26,7 +26,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -72,7 +71,7 @@ type kubernetesRestorer struct {
 	snapshotService    cloudprovider.SnapshotService
 	backupClient       arkv1client.BackupsGetter
 	namespaceClient    corev1.NamespaceInterface
-	daemonSetExecutor  restic.DaemonSetExecutor
+	resticRestorer     restic.Restorer
 	resourcePriorities []string
 	fileSystem         FileSystem
 	logger             logrus.FieldLogger
@@ -145,7 +144,7 @@ func NewKubernetesRestorer(
 	resourcePriorities []string,
 	backupClient arkv1client.BackupsGetter,
 	namespaceClient corev1.NamespaceInterface,
-	daemonSetExecutor restic.DaemonSetExecutor,
+	resticRestorer restic.Restorer,
 	logger logrus.FieldLogger,
 ) (Restorer, error) {
 	return &kubernetesRestorer{
@@ -155,7 +154,7 @@ func NewKubernetesRestorer(
 		snapshotService:    snapshotService,
 		backupClient:       backupClient,
 		namespaceClient:    namespaceClient,
-		daemonSetExecutor:  daemonSetExecutor,
+		resticRestorer:     resticRestorer,
 		resourcePriorities: resourcePriorities,
 		fileSystem:         &osFileSystem{},
 		logger:             logger,
@@ -212,7 +211,7 @@ func (kr *kubernetesRestorer) Restore(restore *api.Restore, backup *api.Backup, 
 		namespaceClient:      kr.namespaceClient,
 		actions:              resolvedActions,
 		snapshotService:      kr.snapshotService,
-		daemonSetExecutor:    kr.daemonSetExecutor,
+		resticRestorer:       kr.resticRestorer,
 		waitForPVs:           true,
 	}
 
@@ -293,7 +292,7 @@ type context struct {
 	actions              []resolvedAction
 	snapshotService      cloudprovider.SnapshotService
 	waitForPVs           bool
-	daemonSetExecutor    restic.DaemonSetExecutor
+	resticRestorer       restic.Restorer
 }
 
 func (ctx *context) infof(msg string, args ...interface{}) {
@@ -620,19 +619,25 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 			}
 		}
 
-		if groupResource == kuberesource.Pods {
-			if waiter == nil {
-				podWatch, err := resourceClient.Watch(metav1.ListOptions{})
-				if err != nil {
-					addToResult(&errs, namespace, fmt.Errorf("error watching for namespace %q, resource %q: %v", namespace, &groupResource, err))
-					return warnings, errs
+		if groupResource == kuberesource.Pods && waiter == nil {
+			podWatch, err := resourceClient.Watch(metav1.ListOptions{})
+			if err != nil {
+				addToResult(&errs, namespace, fmt.Errorf("error watching for namespace %q, resource %q: %v", namespace, &groupResource, err))
+				return warnings, errs
+			}
+
+			waiter = newResourceWaiter(podWatch, isPodReady, func(obj runtime.Unstructured) {
+				pod := new(v1.Pod)
+				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), &pod); err != nil {
+					ctx.logger.WithError(err).Error("error converting unstructured pod")
+					return
 				}
 
-				waiter = newResourceWaiter(podWatch, isPodReady, func(obj runtime.Unstructured) {
-					restoreVolumes(ctx.daemonSetExecutor, obj, string(ctx.restore.UID), ctx.logger)
-				}, ctx.logger)
-				defer waiter.Stop()
-			}
+				if err := ctx.resticRestorer.RestorePodVolumes(ctx.restore, pod, ctx.logger); err != nil {
+					ctx.logger.WithError(err).Error("unable to successfully complete restic restore of pod's volumes")
+				}
+			}, ctx.logger)
+			defer waiter.Stop()
 		}
 
 		for _, action := range applicableActions {
@@ -736,32 +741,6 @@ func isPodReady(obj runtime.Unstructured) bool {
 	}
 
 	return false
-}
-
-func restoreVolumes(daemonSetExecutor restic.DaemonSetExecutor, obj runtime.Unstructured, restoreUID string, log logrus.FieldLogger) {
-	var pod v1.Pod
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), &pod); err != nil {
-		log.WithError(err).Error("error converting unstructured pod")
-		return
-	}
-
-	for volumeName, snapshotID := range restic.GetPodSnapshotAnnotations(&pod) {
-		// TODO handle getting volumeDir for PVC's
-
-		if err := daemonSetExecutor.ExecRestore(
-			pod.Spec.NodeName,
-			pod.Namespace,
-			string(pod.UID),
-			volumeName,
-			snapshotID,
-			restoreUID,
-			nil,
-			time.Minute,
-			log,
-		); err != nil {
-			log.WithError(err).Error("error executing restic restore")
-		}
-	}
 }
 
 func (ctx *context) executePVAction(obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {

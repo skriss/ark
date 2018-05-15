@@ -20,7 +20,7 @@ ADD restic .
 
 ADD restic-wrapper .
 
-ADD run-restore.sh .
+ADD complete-restore.sh .
 
 ENTRYPOINT ["/bin/ash", "-c", "while true; do sleep 1; done"]
 

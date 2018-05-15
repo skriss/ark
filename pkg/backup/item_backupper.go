@@ -19,21 +19,20 @@ package backup
 import (
 	"archive/tar"
 	"encoding/json"
-	"fmt"
 	"path/filepath"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	apiv1 "k8s.io/api/core/v1"
+	corev1api "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
-	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/client"
@@ -67,11 +66,7 @@ func (f *defaultItemBackupperFactory) newItemBackupper(ctx *backupContext, deps 
 		itemHookHandler: &defaultItemHookHandler{
 			podCommandExecutor: deps.podCommandExecutor,
 		},
-		podCommandExecutor: deps.podCommandExecutor,
-		podClient:          deps.podClient,
-		pvcGetter:          deps.pvcGetter,
-		resticMgr:          deps.resticMgr,
-		resticExecutor:     restic.NewDaemonSetExecutor(deps.podCommandExecutor, deps.podClient, deps.resticMgr.RepoPrefix()),
+		resticBackupper: deps.resticBackupper,
 	}
 
 	// this is for testing purposes
@@ -96,9 +91,7 @@ type itemBackupperDependencies struct {
 	discoveryHelper       discovery.Helper
 	snapshotService       cloudprovider.SnapshotService
 	podCommandExecutor    podexec.PodCommandExecutor
-	podClient             v1.PodInterface
-	pvcGetter             v1.PersistentVolumeClaimsGetter
-	resticMgr             restic.RepositoryManager
+	resticBackupper       restic.Backupper
 }
 
 type ItemBackupper interface {
@@ -116,13 +109,9 @@ type defaultItemBackupper struct {
 	dynamicFactory          client.DynamicFactory
 	discoveryHelper         discovery.Helper
 	snapshotService         cloudprovider.SnapshotService
-	podCommandExecutor      podexec.PodCommandExecutor
 	itemHookHandler         itemHookHandler
 	additionalItemBackupper ItemBackupper
-	podClient               v1.PodInterface
-	pvcGetter               v1.PersistentVolumeClaimsGetter
-	resticMgr               restic.RepositoryManager
-	resticExecutor          restic.DaemonSetExecutor
+	resticBackupper         restic.Backupper
 }
 
 // backupItem backs up an individual item to tarWriter. The item may be excluded based on the
@@ -194,6 +183,25 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 				backupErrs = append(backupErrs, err)
 			}
 		}
+	}
+
+	if groupResource == kuberesource.Pods {
+		pod := new(corev1api.Pod)
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), pod); err != nil {
+			return errors.WithStack(err)
+		}
+
+		if err := ib.resticBackupper.BackupPodVolumes(ib.backup, pod, log); err != nil {
+			return err
+		}
+
+		// pod was permuted by BackupPodVolumes if there were any volumes backed up, so
+		// convert it back to unstructured and assign to obj. so it gets persisted.
+		unstructuredObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod)
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		obj = &unstructured.Unstructured{Object: unstructuredObj}
 	}
 
 	log.Debug("Executing post hooks")
@@ -293,106 +301,6 @@ func (ib *defaultItemBackupper) executeActions(log logrus.FieldLogger, obj runti
 	}
 
 	return nil
-}
-
-func (ib *defaultItemBackupper) handleResticBackup(unstructuredPod runtime.Unstructured, backup *api.Backup, log logrus.FieldLogger) error {
-	var pod apiv1.Pod
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPod.UnstructuredContent(), &pod); err != nil {
-		return err
-	}
-
-	backups := restic.GetVolumesToBackup(&pod)
-
-	// have to modify the unstructured pod's annotations so it gets persisted to the backup
-	metadata, err := meta.Accessor(unstructuredPod)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	// check if the repo for this namespace exists and create it if not
-	exists, err := ib.resticMgr.RepositoryExists(pod.Namespace)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		if err := ib.resticMgr.InitRepo(pod.Namespace); err != nil {
-			return err
-		}
-	}
-
-	// get annotations on backup
-	if backup.Annotations == nil {
-		backup.Annotations = make(map[string]string)
-	}
-
-	snapshots, err := restic.GetSnapshotsInBackup(backup)
-	if err != nil {
-		return err
-	}
-
-	var errs []error
-	for _, volumeName := range backups {
-		// ensure specified volume exists in pod
-		var volume *apiv1.Volume
-		for _, v := range pod.Spec.Volumes {
-			if v.Name == volumeName {
-				volume = &v
-				break
-			}
-		}
-
-		if volume == nil {
-			errs = append(errs, errors.Errorf("volume %s does not exist in pod %s", volumeName, pod.Name))
-			continue
-		}
-
-		tags := map[string]string{
-			"backup":     backup.Name,
-			"ns":         pod.Namespace,
-			"pod":        pod.Name,
-			"volume":     volumeName,
-			"backup-uid": string(backup.UID),
-			"pod-uid":    string(pod.UID),
-		}
-
-		var tagsFlags []string
-		for k, v := range tags {
-			tagsFlags = append(tagsFlags, fmt.Sprintf("--tag=%s=%s", k, v))
-		}
-
-		var volumeDir string
-		if volume.VolumeSource.PersistentVolumeClaim == nil {
-			volumeDir = volume.Name
-		} else {
-			pvc, err := ib.pvcGetter.PersistentVolumeClaims(pod.Namespace).Get(volume.VolumeSource.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
-			if err != nil {
-				errs = append(errs, errors.Wrapf(err, "unable to get persistent volume claim %s", volume.VolumeSource.PersistentVolumeClaim.ClaimName))
-				continue
-			}
-			volumeDir = pvc.Spec.VolumeName
-		}
-
-		if err := ib.resticExecutor.ExecBackup(pod.Spec.NodeName, pod.Namespace, string(pod.UID), volumeDir, tagsFlags, time.Minute, log); err != nil {
-			errs = append(errs, err)
-			continue
-		}
-
-		snapshotID, err := ib.resticMgr.GetSnapshotID(pod.Namespace, string(backup.UID), string(pod.UID), volumeName)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-
-		restic.SetPodSnapshotAnnotation(metadata, volumeName, snapshotID)
-
-		snapshots = append(snapshots, fmt.Sprintf("%s/%s", pod.Namespace, snapshotID))
-	}
-
-	if err := restic.SetSnapshotsInBackup(backup, snapshots); err != nil {
-		return err
-	}
-
-	return kubeerrs.NewAggregate(errs)
 }
 
 // zoneLabel is the label that stores availability-zone info

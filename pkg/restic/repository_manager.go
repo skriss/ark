@@ -19,6 +19,9 @@ package restic
 import (
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
 	"strings"
 	"sync"
 
@@ -29,11 +32,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	kerrs "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/client-go/kubernetes/typed/core/v1"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/heptio/ark/pkg/cloudprovider"
 )
 
+// TODO this is more like a metadata manager
 type RepositoryManager interface {
 	RepoPrefix() string
 	RepositoryExists(name string) (bool, error)
@@ -51,7 +55,7 @@ type repositoryManager struct {
 	objectStore   cloudprovider.ObjectStore
 	backendType   BackendType
 	bucket        string
-	secretsClient v1.SecretInterface
+	secretsClient corev1client.SecretInterface
 	log           logrus.FieldLogger
 	repoPrefix    string
 }
@@ -70,7 +74,7 @@ const (
 )
 
 // NewRepositoryManager constructs a RepositoryManager.
-func NewRepositoryManager(objectStore cloudprovider.ObjectStore, backendType BackendType, bucket string, secretsClient v1.SecretInterface, log logrus.FieldLogger) RepositoryManager {
+func NewRepositoryManager(objectStore cloudprovider.ObjectStore, backendType BackendType, bucket string, secretsClient corev1client.SecretInterface, log logrus.FieldLogger) RepositoryManager {
 	rm := &repositoryManager{
 		objectStore:   objectStore,
 		backendType:   backendType,
@@ -157,13 +161,14 @@ func (rm *repositoryManager) InitRepo(name string) error {
 	}
 
 	// init the repo
-	_, err = newCommandBuilder(rm.repoPrefix).
-		WithCommand("init").
-		WithRepo(name).
-		WithEnsureCredsFile(rm.secretsClient).
-		RunAndLog(rm.log)
+	cmd := &command{
+		baseName:   "/restic",
+		command:    "init",
+		repoPrefix: rm.repoPrefix,
+		repo:       name,
+	}
 
-	return errors.WithStack(err)
+	return errorOnly(rm.exec(cmd))
 }
 
 func (rm *repositoryManager) getAllRepos() ([]string, error) {
@@ -268,25 +273,25 @@ func (rm *repositoryManager) PruneAllRepos() error {
 }
 
 func (rm *repositoryManager) CheckRepo(name string) error {
-	rm.log.Debugf("checking repository %s", name)
+	cmd := &command{
+		baseName:   "/restic",
+		command:    "check",
+		repoPrefix: rm.repoPrefix,
+		repo:       name,
+	}
 
-	_, err := newCommandBuilder(rm.repoPrefix).
-		WithCommand("check").
-		WithRepo(name).
-		WithEnsureCredsFile(rm.secretsClient).
-		RunAndLog(rm.log)
-
-	return errors.WithStack(err)
+	return errorOnly(rm.exec(cmd))
 }
 
 func (rm *repositoryManager) PruneRepo(name string) error {
-	_, err := newCommandBuilder(rm.repoPrefix).
-		WithCommand("prune").
-		WithRepo(name).
-		WithEnsureCredsFile(rm.secretsClient).
-		RunAndLog(rm.log)
+	cmd := &command{
+		baseName:   "/restic",
+		command:    "prune",
+		repoPrefix: rm.repoPrefix,
+		repo:       name,
+	}
 
-	return errors.WithStack(err)
+	return errorOnly(rm.exec(cmd))
 }
 
 func (rm *repositoryManager) GetSnapshotID(repo, backupUID, podUID, volume string) (string, error) {
@@ -297,14 +302,15 @@ func (rm *repositoryManager) GetSnapshotID(repo, backupUID, podUID, volume strin
 		"backup-uid=" + backupUID,
 	}
 
-	res, err := newCommandBuilder(rm.repoPrefix).
-		WithCommand("snapshots").
-		WithRepo(repo).
-		WithArgs("--json", "--last").
-		WithArgs("--tag=" + strings.Join(tagFilters, ",")).
-		WithEnsureCredsFile(rm.secretsClient).
-		RunAndLog(rm.log)
+	cmd := &command{
+		baseName:   "/restic",
+		command:    "snapshots",
+		repoPrefix: rm.repoPrefix,
+		repo:       repo,
+		extraFlags: []string{"--json", "--last", fmt.Sprintf("--tag=%s", strings.Join(tagFilters, ","))},
+	}
 
+	res, err := rm.exec(cmd)
 	if err != nil {
 		return "", errors.Wrap(err, "unable to run restic snapshots command")
 	}
@@ -325,12 +331,53 @@ func (rm *repositoryManager) GetSnapshotID(repo, backupUID, podUID, volume strin
 }
 
 func (rm *repositoryManager) Forget(repo, snapshotID string) error {
-	_, err := newCommandBuilder(rm.repoPrefix).
-		WithCommand("forget").
-		WithRepo(repo).
-		WithArgs(snapshotID).
-		WithEnsureCredsFile(rm.secretsClient).
-		RunAndLog(rm.log)
+	cmd := &command{
+		baseName:   "/restic",
+		command:    "forget",
+		repoPrefix: rm.repoPrefix,
+		repo:       repo,
+		args:       []string{snapshotID},
+	}
 
-	return errors.WithStack(err)
+	return errorOnly(rm.exec(cmd))
+}
+
+func (rm *repositoryManager) exec(cmd *command) ([]byte, error) {
+	// get the encryption key for this repo from the secret
+	secret, err := rm.secretsClient.Get(credsSecret, metav1.GetOptions{})
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	repoKey, found := secret.Data[cmd.repo]
+	if !found {
+		return nil, errors.Errorf("key %s not found in restic-credentials secret", cmd.repo)
+	}
+
+	// write it to a temp file
+	file, err := ioutil.TempFile("", fmt.Sprintf("restic-credentials-%s", cmd.repo))
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	defer func() {
+		file.Close()
+		os.Remove(file.Name())
+	}()
+
+	if _, err := file.Write(repoKey); err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	// use the temp creds file for running the command
+	cmd.passwordFile = file.Name()
+
+	res, err := cmd.Command().Output()
+	rm.log.WithField("repository", cmd.repo).Debugf("Ran restic command=%q, output=%s", cmd.String(), res)
+
+	return res, errors.WithStack(err)
+}
+
+func errorOnly(_ interface{}, err error) error {
+	return err
 }

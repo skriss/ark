@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kuberrs "k8s.io/apimachinery/pkg/util/errors"
-	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/client"
@@ -56,9 +55,7 @@ type kubernetesBackupper struct {
 	podCommandExecutor    podexec.PodCommandExecutor
 	groupBackupperFactory groupBackupperFactory
 	snapshotService       cloudprovider.SnapshotService
-	podClient             v1.PodInterface
-	pvcGetter             v1.PersistentVolumeClaimsGetter
-	resticMgr             restic.RepositoryManager
+	resticBackupper       restic.Backupper
 }
 
 type itemKey struct {
@@ -95,9 +92,7 @@ func NewKubernetesBackupper(
 	dynamicFactory client.DynamicFactory,
 	podCommandExecutor podexec.PodCommandExecutor,
 	snapshotService cloudprovider.SnapshotService,
-	podClient v1.PodInterface,
-	pvcGetter v1.PersistentVolumeClaimsGetter,
-	resticMgr restic.RepositoryManager,
+	resticBackupper restic.Backupper,
 ) (Backupper, error) {
 	return &kubernetesBackupper{
 		discoveryHelper:       discoveryHelper,
@@ -105,9 +100,7 @@ func NewKubernetesBackupper(
 		podCommandExecutor:    podCommandExecutor,
 		groupBackupperFactory: &defaultGroupBackupperFactory{},
 		snapshotService:       snapshotService,
-		podClient:             podClient,
-		pvcGetter:             pvcGetter,
-		resticMgr:             resticMgr,
+		resticBackupper:       resticBackupper,
 	}, nil
 }
 
@@ -269,9 +262,7 @@ func (kb *kubernetesBackupper) Backup(backup *api.Backup, backupFile, logFile io
 			discoveryHelper:       kb.discoveryHelper,
 			snapshotService:       kb.snapshotService,
 			podCommandExecutor:    kb.podCommandExecutor,
-			podClient:             kb.podClient,
-			pvcGetter:             kb.pvcGetter,
-			resticMgr:             kb.resticMgr,
+			resticBackupper:       kb.resticBackupper,
 		},
 	)
 

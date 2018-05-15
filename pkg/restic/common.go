@@ -20,10 +20,11 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/pkg/errors"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/heptio/ark/pkg/apis/ark/v1"
-	"github.com/pkg/errors"
+	arkv1client "github.com/heptio/ark/pkg/apis/ark/v1"
 )
 
 const (
@@ -31,6 +32,8 @@ const (
 	volumesToBackupAnnotation   = "backup.ark.heptio.com/backup-volumes"
 	snapshotsInBackupAnnotation = "backup.ark.heptio.com/restic-snapshots"
 )
+
+// TODO audit functions, make private (?)
 
 func PodHasSnapshotAnnotation(obj metav1.Object) bool {
 	for key := range obj.GetAnnotations() {
@@ -94,7 +97,7 @@ func GetVolumesToBackup(obj metav1.Object) []string {
 	return backups
 }
 
-func GetSnapshotsInBackup(backup *v1.Backup) ([]string, error) {
+func GetSnapshotsInBackup(backup *arkv1client.Backup) ([]string, error) {
 	if backup.Annotations == nil {
 		return nil, nil
 	}
@@ -112,7 +115,7 @@ func GetSnapshotsInBackup(backup *v1.Backup) ([]string, error) {
 	return snapshots, nil
 }
 
-func SetSnapshotsInBackup(backup *v1.Backup, snapshots []string) error {
+func SetSnapshotsInBackup(backup *arkv1client.Backup, snapshots []string) error {
 	jsonBytes, err := json.Marshal(snapshots)
 	if err != nil {
 		return errors.WithStack(err)

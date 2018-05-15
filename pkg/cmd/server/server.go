@@ -170,21 +170,22 @@ func getSortedLogLevels() []string {
 }
 
 type server struct {
-	namespace             string
-	kubeClientConfig      *rest.Config
-	kubeClient            kubernetes.Interface
-	arkClient             clientset.Interface
-	objectStore           cloudprovider.ObjectStore
-	backupService         cloudprovider.BackupService
-	snapshotService       cloudprovider.SnapshotService
-	discoveryClient       discovery.DiscoveryInterface
-	clientPool            dynamic.ClientPool
-	sharedInformerFactory informers.SharedInformerFactory
-	ctx                   context.Context
-	cancelFunc            context.CancelFunc
-	logger                logrus.FieldLogger
-	pluginManager         plugin.Manager
-	resticManager         restic.RepositoryManager
+	namespace               string
+	kubeClientConfig        *rest.Config
+	kubeClient              kubernetes.Interface
+	arkClient               clientset.Interface
+	objectStore             cloudprovider.ObjectStore
+	backupService           cloudprovider.BackupService
+	snapshotService         cloudprovider.SnapshotService
+	discoveryClient         discovery.DiscoveryInterface
+	clientPool              dynamic.ClientPool
+	sharedInformerFactory   informers.SharedInformerFactory
+	ctx                     context.Context
+	cancelFunc              context.CancelFunc
+	logger                  logrus.FieldLogger
+	pluginManager           plugin.Manager
+	resticManager           restic.RepositoryManager
+	resticBackupperRestorer restic.BackupperRestorer
 }
 
 func newServer(namespace, baseName, pluginDir string, logger *logrus.Logger) (*server, error) {
@@ -492,6 +493,15 @@ func (s *server) initResticManager(config *api.Config) error {
 		s.logger,
 	)
 
+	s.resticBackupperRestorer = restic.NewBackupperRestorer(
+		s.resticManager,
+		restic.NewDaemonSetExecutor(
+			podexec.NewPodCommandExecutor(s.kubeClientConfig, s.kubeClient.CoreV1().RESTClient()),
+			s.kubeClient.CoreV1().Pods(s.namespace),
+		),
+		s.kubeClient.CoreV1(),
+	)
+
 	s.logger.Info("Checking restic repositories")
 	return s.resticManager.CheckAllRepos()
 }
@@ -544,8 +554,17 @@ func (s *server) runControllers(config *api.Config) error {
 	} else {
 		backupTracker := controller.NewBackupTracker()
 
-		backupper, err := newBackupper(discoveryHelper, s.clientPool, s.backupService, s.snapshotService, s.kubeClientConfig, s.kubeClient.CoreV1(), s.namespace, s.resticManager)
+		backupper, err := newBackupper(
+			discoveryHelper,
+			s.clientPool,
+			s.backupService,
+			s.snapshotService,
+			s.kubeClientConfig,
+			s.kubeClient.CoreV1(),
+			s.resticBackupperRestorer,
+		)
 		cmd.CheckError(err)
+
 		backupController := controller.NewBackupController(
 			s.sharedInformerFactory.Ark().V1().Backups(),
 			s.arkClient.ArkV1(),
@@ -618,11 +637,7 @@ func (s *server) runControllers(config *api.Config) error {
 		config.ResourcePriorities,
 		s.arkClient.ArkV1(),
 		s.kubeClient,
-		restic.NewDaemonSetExecutor(
-			podexec.NewPodCommandExecutor(s.kubeClientConfig, s.kubeClient.CoreV1().RESTClient()),
-			s.kubeClient.CoreV1().Pods(s.namespace),
-			s.resticManager.RepoPrefix(),
-		),
+		s.resticBackupperRestorer,
 		s.logger,
 	)
 	cmd.CheckError(err)
@@ -723,17 +738,14 @@ func newBackupper(
 	snapshotService cloudprovider.SnapshotService,
 	kubeClientConfig *rest.Config,
 	kubeCoreV1Client kcorev1client.CoreV1Interface,
-	namespace string,
-	resticManager restic.RepositoryManager,
+	resticBackupper restic.Backupper,
 ) (backup.Backupper, error) {
 	return backup.NewKubernetesBackupper(
 		discoveryHelper,
 		client.NewDynamicFactory(clientPool),
 		podexec.NewPodCommandExecutor(kubeClientConfig, kubeCoreV1Client.RESTClient()),
 		snapshotService,
-		kubeCoreV1Client.Pods(namespace),
-		kubeCoreV1Client, // PersistentVolumeClaimsGetter
-		resticManager,
+		resticBackupper,
 	)
 }
 
@@ -745,7 +757,7 @@ func newRestorer(
 	resourcePriorities []string,
 	backupClient arkv1client.BackupsGetter,
 	kubeClient kubernetes.Interface,
-	daemonSetExecutor restic.DaemonSetExecutor,
+	resticRestorer restic.Restorer,
 	logger logrus.FieldLogger,
 ) (restore.Restorer, error) {
 	return restore.NewKubernetesRestorer(
@@ -756,7 +768,7 @@ func newRestorer(
 		resourcePriorities,
 		backupClient,
 		kubeClient.CoreV1().Namespaces(),
-		daemonSetExecutor,
+		resticRestorer,
 		logger,
 	)
 }

@@ -17,43 +17,36 @@ limitations under the License.
 package restic
 
 import (
-	"fmt"
-	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	apiv1 "k8s.io/api/core/v1"
+	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes/typed/core/v1"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
-	api "github.com/heptio/ark/pkg/apis/ark/v1"
+	arkv1api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/podexec"
 )
 
 // DaemonSetExecutor can execute commands within the pods of the ark
 // restic daemonset.
 type DaemonSetExecutor interface {
-	Exec(nodeName string, cmd []string, timeout time.Duration, log logrus.FieldLogger) error
-	ExecBackup(nodeName, ns, podUID, volumeDir string, flags []string, timeout time.Duration, log logrus.FieldLogger) error
-	ExecRestore(nodeName, ns, podUID, volumeDir, snapshotID, restoreUID string, flags []string, timeout time.Duration, log logrus.FieldLogger) error
+	Exec(node string, cmd []string, timeout time.Duration, log logrus.FieldLogger) error
 }
 
-func NewDaemonSetExecutor(executor podexec.PodCommandExecutor, podClient v1.PodInterface, repoPrefix string) DaemonSetExecutor {
+func NewDaemonSetExecutor(executor podexec.PodCommandExecutor, podClient corev1client.PodInterface) DaemonSetExecutor {
 	return &defaultDaemonSetExecutor{
-		executor:   executor,
-		podClient:  podClient,
-		repoPrefix: repoPrefix,
+		executor:  executor,
+		podClient: podClient,
 	}
 }
 
 type defaultDaemonSetExecutor struct {
-	executor   podexec.PodCommandExecutor
-	podClient  v1.PodInterface
-	repoPrefix string
+	executor  podexec.PodCommandExecutor
+	podClient corev1client.PodInterface
 }
 
 func (dse *defaultDaemonSetExecutor) Exec(nodeName string, cmd []string, timeout time.Duration, log logrus.FieldLogger) error {
@@ -62,11 +55,11 @@ func (dse *defaultDaemonSetExecutor) Exec(nodeName string, cmd []string, timeout
 		return err
 	}
 
-	dsCmd := &api.ExecHook{
+	dsCmd := &arkv1api.ExecHook{
 		Container: "restic",
 		Command:   cmd,
-		OnError:   api.HookErrorModeFail,
-		Timeout:   metav1.Duration{Duration: time.Minute},
+		OnError:   arkv1api.HookErrorModeFail,
+		Timeout:   metav1.Duration{Duration: timeout},
 	}
 
 	unstructuredPod, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dsPod)
@@ -83,39 +76,7 @@ func (dse *defaultDaemonSetExecutor) Exec(nodeName string, cmd []string, timeout
 		dsCmd)
 }
 
-func (dse *defaultDaemonSetExecutor) ExecBackup(nodeName, ns, podUID, volumeDir string, flags []string, timeout time.Duration, log logrus.FieldLogger) error {
-	resticCmd := newCommandBuilder(dse.repoPrefix).
-		WithBaseName("/restic-wrapper").
-		WithCommand("backup").
-		WithRepo(ns).
-		WithPasswordFile(fmt.Sprintf(credsFilePath, ns)).
-		WithArgs(fmt.Sprintf("/host_pods/%s/volumes/*/%s", podUID, volumeDir)).
-		WithArgs(flags...)
-
-	// need to exec within a shell since we're using a wildcard in the backup path
-	cmd := exec.Command("/bin/sh", "-c", strings.Join(resticCmd.Args(), " "))
-
-	return dse.Exec(nodeName, cmd.Args, timeout, log)
-}
-
-func (dse *defaultDaemonSetExecutor) ExecRestore(nodeName, ns, podUID, volumeDir, snapshotID, restoreUID string, flags []string, timeout time.Duration, log logrus.FieldLogger) error {
-	resticCmd := newCommandBuilder(dse.repoPrefix).
-		WithBaseName("/restic-wrapper").
-		WithCommand("restore").
-		WithRepo(ns).
-		WithPasswordFile(fmt.Sprintf(credsFilePath, ns)).
-		WithArgs(snapshotID).
-		WithArgs(fmt.Sprintf("-t=/restores/%s", podUID)).
-		WithArgs(flags...)
-
-	if err := dse.Exec(nodeName, resticCmd.Args(), timeout, log); err != nil {
-		return err
-	}
-
-	return dse.Exec(nodeName, []string{"/run-restore.sh", podUID, volumeDir, restoreUID}, timeout, log)
-}
-
-func (dse *defaultDaemonSetExecutor) getDaemonSetPod(node string) (*apiv1.Pod, error) {
+func (dse *defaultDaemonSetExecutor) getDaemonSetPod(node string) (*corev1api.Pod, error) {
 	// TODO we may want to cache this list
 	dsPods, err := dse.podClient.List(metav1.ListOptions{LabelSelector: "name=restic-daemon"})
 	if err != nil {
