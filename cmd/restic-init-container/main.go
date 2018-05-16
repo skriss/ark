@@ -13,7 +13,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -27,8 +27,9 @@ func main() {
 	}
 }
 
-// done returns true if a file exists under /restores/.ark whose name
-// is equal to os.Args[1], or false otherwise
+// done returns true if for each directory under /restores, a file exists
+// within the .ark/ subdirectory whose name is equal to os.Args[1], or
+// false otherwise
 func done() bool {
 	children, err := ioutil.ReadDir("/restores")
 	if err != nil {
