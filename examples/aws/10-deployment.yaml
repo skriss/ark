@@ -40,8 +40,6 @@ spec:
               mountPath: /credentials
             - name: plugins
               mountPath: /plugins
-            - name: restic-credentials
-              mountPath: /restic-credentials
           env:
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: /credentials/cloud
@@ -61,8 +59,5 @@ spec:
         - name: cloud-credentials
           secret:
             secretName: cloud-credentials
-        - name: restic-credentials
-          secret:
-            secretName: restic-credentials
         - name: plugins
           emptyDir: {}

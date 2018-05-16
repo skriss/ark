@@ -33,7 +33,10 @@ type command struct {
 }
 
 func (c *command) StringSlice() []string {
-	res := []string{c.baseName, c.command, repoFlag(c.repoPrefix, c.repo), passwordFlag(c.passwordFile, c.repo)}
+	res := []string{c.baseName, c.command, repoFlag(c.repoPrefix, c.repo)}
+	if c.passwordFile != "" {
+		res = append(res, passwordFlag(c.passwordFile))
+	}
 	res = append(res, c.args...)
 	res = append(res, c.extraFlags...)
 
@@ -53,10 +56,7 @@ func repoFlag(prefix, repo string) string {
 	return fmt.Sprintf("-r=%s/%s", prefix, repo)
 }
 
-func passwordFlag(file, repo string) string {
-	if file == "" {
-		file = repo
-	}
+func passwordFlag(file string) string {
 	return fmt.Sprintf("-p=%s", file)
 }
 

@@ -6,87 +6,65 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
+	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 )
 
 func main() {
-	// get all the args except the program name
-	var args []string
-	if len(os.Args) > 1 {
-		args = os.Args[1:]
+	repo := repoName(os.Args[1:])
+	if repo == "" {
+		checkError(errors.New("repository flag (-r) not found"), "ERROR getting repository name")
 	}
 
-	var (
-		passwordFileArg      string
-		passwordFileArgIndex int
-	)
-
-	// find the -p flag
-	for i, arg := range args {
-		if strings.HasPrefix(arg, "-p=") {
-			passwordFileArg = arg
-			passwordFileArgIndex = i
-			break
-		}
+	ns := os.Getenv("HEPTIO_ARK_NAMESPACE")
+	if ns == "" {
+		checkError(errors.New("HEPTIO_ARK_NAMESPACE environment variable not found"), "ERROR getting heptio ark namespace")
 	}
 
-	if passwordFileArg != "" {
-		passwordFile := strings.Replace(passwordFileArg, "-p=", "", 1)
+	secrets, err := secretInterface(ns)
+	checkError(err, "ERROR getting secrets interface")
 
-		_, err := os.Stat(passwordFile)
-		switch {
-		case os.IsNotExist(err):
-			client, err := coreV1Client()
-			checkError(err, "ERROR getting corev1 client")
+	secret, err := secrets.Get("restic-credentials", metav1.GetOptions{})
+	checkError(err, "ERROR getting heptio-ark/restic-credentials secret")
 
-			ns := os.Getenv("HEPTIO_ARK_NAMESPACE")
-			if ns == "" {
-				checkError(errors.New("HEPTIO_ARK_NAMESPACE environment variable not found"), "unable to determine namespace")
-			}
+	passwordFile, err := createPasswordFile(secret, repo)
+	checkError(err, "ERROR creating password temp file")
+	defer os.Remove(passwordFile)
 
-			secret, err := client.Secrets(ns).Get("restic-credentials", metav1.GetOptions{})
-			checkError(err, "ERROR getting heptio-ark/restic-credentials secret")
-
-			// inline func to scope the defer-close of the file
-			func() {
-				_, repo := filepath.Split(passwordFile)
-
-				file, err := ioutil.TempFile("", fmt.Sprintf("restic-credentials-%s", repo))
-				checkError(err, "ERROR creating temp file")
-				defer file.Close()
-
-				_, err = file.Write(secret.Data[repo])
-				checkError(err, "ERROR writing to temp file")
-
-				args[passwordFileArgIndex] = "-p=" + file.Name()
-			}()
-		}
-	}
-
-	resticCmd := exec.Command("/restic", args...)
+	resticArgs := append([]string{"-p=" + passwordFile}, os.Args[1:]...)
+	resticCmd := exec.Command("/restic", resticArgs...)
 	resticCmd.Stdout = os.Stdout
 	resticCmd.Stderr = os.Stderr
 
-	checkError(resticCmd.Run(), "ERROR running /restic command")
+	checkError(resticCmd.Run(), "ERROR running restic command")
 }
 
-func coreV1Client() (*v1client.CoreV1Client, error) {
+func repoName(args []string) string {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-r=") {
+			return arg[strings.LastIndex(arg, "/")+1:]
+		}
+	}
+
+	return ""
+}
+
+func secretInterface(namespace string) (corev1client.SecretInterface, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, err
 	}
 
-	client, err := v1client.NewForConfig(cfg)
+	client, err := corev1client.NewForConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return client, nil
+	return client.Secrets(namespace), nil
 }
 
 // checkError prints an error message and the error's text to stderr and
@@ -97,4 +75,19 @@ func checkError(err error, msg string) {
 		fmt.Fprintf(os.Stderr, msg+": %s\n", err)
 		os.Exit(1)
 	}
+}
+
+func createPasswordFile(secret *corev1api.Secret, repo string) (string, error) {
+	file, err := ioutil.TempFile("", fmt.Sprintf("restic-credentials-%s", repo))
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	_, err = file.Write(secret.Data[repo])
+	if err != nil {
+		return "", err
+	}
+
+	return file.Name(), nil
 }
