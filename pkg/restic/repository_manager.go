@@ -29,6 +29,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
+	corev1api "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	kerrs "k8s.io/apimachinery/pkg/util/errors"
@@ -116,7 +118,17 @@ func (rm *repositoryManager) RepositoryExists(name string) (bool, error) {
 
 func (rm *repositoryManager) InitRepo(name string) error {
 	resticCreds, err := rm.secretsClient.Get(credsSecret, metav1.GetOptions{})
-	if err != nil {
+	if apierrors.IsNotFound(err) {
+		secret := &corev1api.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: credsSecret,
+			},
+			Type: corev1api.SecretTypeOpaque,
+		}
+		if resticCreds, err = rm.secretsClient.Create(secret); err != nil {
+			return errors.WithStack(err)
+		}
+	} else if err != nil {
 		return errors.WithStack(err)
 	}
 
@@ -183,8 +195,11 @@ func (rm *repositoryManager) getAllRepos() ([]string, error) {
 			continue
 		}
 
-		// strip the trailing '/'
-		repos = append(repos, prefix[0:len(prefix)-1])
+		// strip the trailing '/' if it exists
+		if prefix[len(prefix)-1] == '/' {
+			prefix = prefix[0 : len(prefix)-1]
+		}
+		repos = append(repos, prefix)
 	}
 
 	return repos, nil
