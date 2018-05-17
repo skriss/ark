@@ -35,6 +35,10 @@ func main() {
 	checkError(err, "ERROR creating password temp file")
 	defer os.Remove(passwordFile)
 
+	// set the env vars that restic uses for azure credentials
+	os.Setenv("AZURE_ACCOUNT_NAME", os.Getenv("AZURE_STORAGE_ACCOUNT_ID"))
+	os.Setenv("AZURE_ACCOUNT_KEY", os.Getenv("AZURE_STORAGE_KEY"))
+
 	resticArgs := append([]string{"-p=" + passwordFile}, os.Args[1:]...)
 	resticCmd := exec.Command("/restic", resticArgs...)
 	resticCmd.Stdout = os.Stdout

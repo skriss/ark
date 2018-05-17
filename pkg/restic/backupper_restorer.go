@@ -137,9 +137,12 @@ func (br *backupperRestorer) BackupPodVolumes(backup *arkv1api.Backup, pod *core
 		backupSnapshots = append(backupSnapshots, fmt.Sprintf("%s/%s", pod.Namespace, snapshotID))
 	}
 
-	// update backup's annotations with all snapshot IDs
-	if err := SetSnapshotsInBackup(backup, backupSnapshots); err != nil {
-		errs = append(errs, err)
+	// only write the backup annotation if we had at least one successful snapshot
+	if len(backupSnapshots) > 0 {
+		// update backup's annotations with all snapshot IDs
+		if err := SetSnapshotsInBackup(backup, backupSnapshots); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	return kerrs.NewAggregate(errs)

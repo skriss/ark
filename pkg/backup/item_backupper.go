@@ -190,7 +190,7 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 		}
 	}
 
-	if groupResource == kuberesource.Pods {
+	if groupResource == kuberesource.Pods && len(restic.GetVolumesToBackup(metadata)) > 0 {
 		pod := new(corev1api.Pod)
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), pod); err != nil {
 			return errors.WithStack(err)

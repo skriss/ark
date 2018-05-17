@@ -230,6 +230,7 @@ func (c *backupDeletionController) processRequest(req *v1.DeleteBackupRequest) e
 		}
 	}
 
+	// Try to delete restic snapshots
 	log.Info("Removing restic snapshots")
 	if snapshots, err := restic.GetSnapshotsInBackup(backup); err != nil {
 		errs = append(errs, err.Error())
