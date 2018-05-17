@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws/defaults"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -256,10 +257,11 @@ func (s *server) run() error {
 		return err
 	}
 
-	if err := s.initResticManager(config); err != nil {
+	// TODO only do these things if restic is enabled
+	// TODO probably want to check for existence of the DS
+	if err := s.initRestic(config); err != nil {
 		return err
 	}
-
 	s.runResticMaintenance()
 
 	if err := s.runControllers(config); err != nil {
@@ -484,7 +486,21 @@ func durationMin(a, b time.Duration) time.Duration {
 	return b
 }
 
-func (s *server) initResticManager(config *api.Config) error {
+func (s *server) initRestic(config *api.Config) error {
+	// set the env vars that restic requires for creds purposes
+	switch restic.BackendType(config.BackupStorageProvider.Name) {
+	case restic.AWSBackend:
+		creds, err := defaults.Get().Config.Credentials.Get()
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		os.Setenv("AWS_ACCESS_KEY_ID", creds.AccessKeyID)
+		os.Setenv("AWS_SECRET_ACCESS_KEY", creds.SecretAccessKey)
+	case restic.AzureBackend:
+		os.Setenv("AZURE_ACCOUNT_NAME", os.Getenv("AZURE_STORAGE_ACCOUNT_ID"))
+		os.Setenv("AZURE_ACCOUNT_KEY", os.Getenv("AZURE_STORAGE_KEY"))
+	}
+
 	s.resticManager = restic.NewRepositoryManager(
 		s.objectStore,
 		restic.BackendType(config.BackupStorageProvider.Name),

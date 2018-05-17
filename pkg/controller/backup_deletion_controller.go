@@ -231,14 +231,14 @@ func (c *backupDeletionController) processRequest(req *v1.DeleteBackupRequest) e
 	}
 
 	log.Info("Removing restic snapshots")
-	snapshots, err := restic.GetSnapshotsInBackup(backup)
-	if err != nil {
+	if snapshots, err := restic.GetSnapshotsInBackup(backup); err != nil {
 		errs = append(errs, err.Error())
 	} else {
 		for _, snapshot := range snapshots {
 			parts := strings.Split(snapshot, "/")
 			if len(parts) != 2 {
 				errs = append(errs, "error parsing restic snapshot identifier: invalid format")
+				continue
 			}
 
 			if err := c.resticMgr.Forget(parts[0], parts[1]); err != nil {

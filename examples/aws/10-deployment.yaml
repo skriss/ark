@@ -43,18 +43,6 @@ spec:
           env:
             - name: AWS_SHARED_CREDENTIALS_FILE
               value: /credentials/cloud
-            # TODO need to figure out how cloud creds for restic will
-            # be sourced.
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: restic-credentials
-                  key: AWS_ACCESS_KEY_ID
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: restic-credentials
-                  key: AWS_SECRET_ACCESS_KEY
       volumes:
         - name: cloud-credentials
           secret:

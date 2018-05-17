@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"time"
 )
 
 func main() {
 	if len(os.Args) != 2 {
-		logError("ERROR: exactly one argument must be provided, the restore's UID")
+		fmt.Fprintln(os.Stderr, "ERROR: exactly one argument must be provided, the restore's UID")
 		os.Exit(1)
 	}
 
@@ -33,7 +34,7 @@ func main() {
 func done() bool {
 	children, err := ioutil.ReadDir("/restores")
 	if err != nil {
-		logError("ERROR reading /restores directory: %s\n", err)
+		fmt.Fprintf(os.Stderr, "ERROR reading /restores directory: %s\n", err)
 		return false
 	}
 
@@ -43,22 +44,18 @@ func done() bool {
 			continue
 		}
 
-		_, err := os.Stat("/restores/" + child.Name() + "/.ark/" + os.Args[1])
-		switch {
-		case err == nil:
-			fmt.Printf("Found /restores/%s/.ark/%s", child.Name(), os.Args[1])
-		case os.IsNotExist(err):
-			fmt.Printf("Not found: /restores/%s/.ark/%s\n", child.Name(), os.Args[1])
+		doneFile := filepath.Join("/restores", child.Name(), ".ark", os.Args[1])
+
+		if _, err := os.Stat(doneFile); os.IsNotExist(err) {
+			fmt.Printf("Not found: %s\n", doneFile)
 			return false
-		default:
-			logError("Error looking for /restores/%s/.ark/%s: %s\n", child.Name(), os.Args[1], err)
+		} else if err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR looking for %s: %s\n", doneFile, err)
 			return false
 		}
+
+		fmt.Printf("Found %s", doneFile)
 	}
 
 	return true
-}
-
-func logError(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, format, args...)
 }
