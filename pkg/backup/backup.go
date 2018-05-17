@@ -247,23 +247,19 @@ func (kb *kubernetesBackupper) Backup(backup *api.Backup, backupFile, logFile io
 
 	gb := kb.groupBackupperFactory.newGroupBackupper(
 		log,
-		&backupContext{
-			backup:        backup,
-			namespaces:    namespaceIncludesExcludes,
-			resources:     resourceIncludesExcludes,
-			backedUpItems: backedUpItems,
-			actions:       resolvedActions,
-			tarWriter:     tw,
-			resourceHooks: resourceHooks,
-		},
-		&itemBackupperDependencies{
-			cohabitatingResources: cohabitatingResources(),
-			dynamicFactory:        kb.dynamicFactory,
-			discoveryHelper:       kb.discoveryHelper,
-			snapshotService:       kb.snapshotService,
-			podCommandExecutor:    kb.podCommandExecutor,
-			resticBackupper:       kb.resticBackupper,
-		},
+		backup,
+		namespaceIncludesExcludes,
+		resourceIncludesExcludes,
+		kb.dynamicFactory,
+		kb.discoveryHelper,
+		backedUpItems,
+		cohabitatingResources(),
+		resolvedActions,
+		kb.podCommandExecutor,
+		tw,
+		resourceHooks,
+		kb.snapshotService,
+		kb.resticBackupper,
 	)
 
 	for _, group := range kb.discoveryHelper.Resources() {

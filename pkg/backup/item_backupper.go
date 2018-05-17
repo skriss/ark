@@ -46,52 +46,57 @@ import (
 )
 
 type itemBackupperFactory interface {
-	newItemBackupper(ctx *backupContext, itemBackupperDependencies *itemBackupperDependencies) ItemBackupper
+	newItemBackupper(
+		backup *api.Backup,
+		namespaces, resources *collections.IncludesExcludes,
+		backedUpItems map[itemKey]struct{},
+		actions []resolvedAction,
+		podCommandExecutor podexec.PodCommandExecutor,
+		tarWriter tarWriter,
+		resourceHooks []resourceHook,
+		dynamicFactory client.DynamicFactory,
+		discoveryHelper discovery.Helper,
+		snapshotService cloudprovider.SnapshotService,
+		resticBackupper restic.Backupper,
+	) ItemBackupper
 }
 
 type defaultItemBackupperFactory struct{}
 
-func (f *defaultItemBackupperFactory) newItemBackupper(ctx *backupContext, deps *itemBackupperDependencies) ItemBackupper {
+func (f *defaultItemBackupperFactory) newItemBackupper(
+	backup *api.Backup,
+	namespaces, resources *collections.IncludesExcludes,
+	backedUpItems map[itemKey]struct{},
+	actions []resolvedAction,
+	podCommandExecutor podexec.PodCommandExecutor,
+	tarWriter tarWriter,
+	resourceHooks []resourceHook,
+	dynamicFactory client.DynamicFactory,
+	discoveryHelper discovery.Helper,
+	snapshotService cloudprovider.SnapshotService,
+	resticBackupper restic.Backupper,
+) ItemBackupper {
 	ib := &defaultItemBackupper{
-		backup:          ctx.backup,
-		namespaces:      ctx.namespaces,
-		resources:       ctx.resources,
-		backedUpItems:   ctx.backedUpItems,
-		actions:         ctx.actions,
-		tarWriter:       ctx.tarWriter,
-		resourceHooks:   ctx.resourceHooks,
-		dynamicFactory:  deps.dynamicFactory,
-		discoveryHelper: deps.discoveryHelper,
-		snapshotService: deps.snapshotService,
+		backup:          backup,
+		namespaces:      namespaces,
+		resources:       resources,
+		backedUpItems:   backedUpItems,
+		actions:         actions,
+		tarWriter:       tarWriter,
+		resourceHooks:   resourceHooks,
+		dynamicFactory:  dynamicFactory,
+		discoveryHelper: discoveryHelper,
+		snapshotService: snapshotService,
 		itemHookHandler: &defaultItemHookHandler{
-			podCommandExecutor: deps.podCommandExecutor,
+			podCommandExecutor: podCommandExecutor,
 		},
-		resticBackupper: deps.resticBackupper,
+		resticBackupper: resticBackupper,
 	}
 
 	// this is for testing purposes
 	ib.additionalItemBackupper = ib
 
 	return ib
-}
-
-type backupContext struct {
-	backup        *api.Backup
-	namespaces    *collections.IncludesExcludes
-	resources     *collections.IncludesExcludes
-	actions       []resolvedAction
-	resourceHooks []resourceHook
-	backedUpItems map[itemKey]struct{}
-	tarWriter     tarWriter
-}
-
-type itemBackupperDependencies struct {
-	cohabitatingResources map[string]*cohabitatingResource
-	dynamicFactory        client.DynamicFactory
-	discoveryHelper       discovery.Helper
-	snapshotService       cloudprovider.SnapshotService
-	podCommandExecutor    podexec.PodCommandExecutor
-	resticBackupper       restic.Backupper
 }
 
 type ItemBackupper interface {
