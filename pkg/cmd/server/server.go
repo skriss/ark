@@ -257,12 +257,20 @@ func (s *server) run() error {
 		return err
 	}
 
-	// TODO only do these things if restic is enabled
-	// TODO probably want to check for existence of the DS
-	if err := s.initRestic(config); err != nil {
-		return err
+	if config.BackupStorageProvider.ResticLocation != "" {
+		if err := s.initRestic(config.BackupStorageProvider); err != nil {
+			return err
+		}
+		s.runResticMaintenance()
+
+		// warn if restic daemonset does not exist
+		_, err := s.kubeClient.AppsV1().DaemonSets(s.namespace).Get("restic-daemon", metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			s.logger.Warn("Ark restic DaemonSet not found; restic backups will fail until it's created")
+		} else if err != nil {
+			return errors.WithStack(err)
+		}
 	}
-	s.runResticMaintenance()
 
 	if err := s.runControllers(config); err != nil {
 		return err
@@ -486,9 +494,9 @@ func durationMin(a, b time.Duration) time.Duration {
 	return b
 }
 
-func (s *server) initRestic(config *api.Config) error {
-	// set the env vars that restic requires for creds purposes
-	switch restic.BackendType(config.BackupStorageProvider.Name) {
+func (s *server) initRestic(config api.ObjectStorageProviderConfig) error {
+	// set the env vars that restic uses for creds purposes
+	switch restic.BackendType(config.Name) {
 	case restic.AWSBackend:
 		creds, err := defaults.Get().Config.Credentials.Get()
 		if err != nil {
@@ -503,8 +511,8 @@ func (s *server) initRestic(config *api.Config) error {
 
 	s.resticManager = restic.NewRepositoryManager(
 		s.objectStore,
-		restic.BackendType(config.BackupStorageProvider.Name),
-		"ark-restic-backups", // TODO need to get the restic bucket name from config somwehere
+		restic.BackendType(config.Name),
+		config.ResticLocation,
 		s.kubeClient.CoreV1().Secrets(s.namespace),
 		s.logger,
 	)

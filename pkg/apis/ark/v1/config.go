@@ -86,4 +86,10 @@ type ObjectStorageProviderConfig struct {
 	// Bucket is the name of the bucket in object storage where Ark backups
 	// are stored.
 	Bucket string `json:"bucket"`
+
+	// ResticLocation is the bucket and optional prefix in object storage where
+	// Ark stores restic backups of pod volumes, specified either as "bucket" or
+	// "bucket/prefix". This bucket must be different than the `Bucket` field.
+	// Optional.
+	ResticLocation string `json:"resticLocation"`
 }
