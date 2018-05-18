@@ -18,6 +18,7 @@ package restic
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -120,7 +121,7 @@ func (br *backupperRestorer) BackupPodVolumes(backup *arkv1api.Backup, pod *core
 		cmd := backupCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), volumeDir, snapshotTags)
 
 		// exec it in the daemonset pod
-		if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, time.Minute, log); err != nil {
+		if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, 10*time.Minute, log); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -155,40 +156,59 @@ func (br *backupperRestorer) RestorePodVolumes(restore *arkv1api.Restore, pod *c
 		return nil
 	}
 
-	var errs []error
+	var (
+		errs    []error
+		errLock sync.Mutex
+		wg      sync.WaitGroup
+	)
+
 	// for each volume to restore:
 	for volumeName, snapshotID := range volumesToRestore {
-		// confirm it exists in the pod
-		volume := getVolume(pod, volumeName)
-		if volume == nil {
-			errs = append(errs, errors.Errorf("volume %s does not exist in pod %s", volumeName, kube.NamespaceAndName(pod)))
-			continue
-		}
+		wg.Add(1)
+		go func(volumeName, snapshotID string) {
+			defer wg.Done()
 
-		// get the volume's directory name under /var/lib/kubelet/pods/... on the host
-		volumeDir, err := getVolumeDirectory(volume, pod.Namespace, br.pvcGetter)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
+			// confirm it exists in the pod
+			volume := getVolume(pod, volumeName)
+			if volume == nil {
+				errLock.Lock()
+				errs = append(errs, errors.Errorf("volume %s does not exist in pod %s", volumeName, kube.NamespaceAndName(pod)))
+				errLock.Unlock()
+				return
+			}
 
-		// assemble restic restore command
-		cmd := restoreCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), snapshotID)
+			// get the volume's directory name under /var/lib/kubelet/pods/... on the host
+			volumeDir, err := getVolumeDirectory(volume, pod.Namespace, br.pvcGetter)
+			if err != nil {
+				errLock.Lock()
+				errs = append(errs, err)
+				errLock.Unlock()
+				return
+			}
 
-		// exec it in the daemonset pod
-		if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, time.Minute, log); err != nil {
-			errs = append(errs, err)
-			continue
-		}
+			// assemble restic restore command
+			cmd := restoreCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), snapshotID)
 
-		// exec the post-restore command (copy contents into target dir, write done file)
-		cmd = []string{"/complete-restore.sh", string(pod.UID), volumeDir, string(restore.UID)}
-		if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, time.Minute, log); err != nil {
-			errs = append(errs, err)
-			continue
-		}
+			// exec it in the daemonset pod
+			if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, 10*time.Minute, log); err != nil {
+				errLock.Lock()
+				errs = append(errs, err)
+				errLock.Unlock()
+				return
+			}
+
+			// exec the post-restore command (copy contents into target dir, write done file)
+			cmd = []string{"/complete-restore.sh", string(pod.UID), volumeDir, string(restore.UID)}
+			if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, time.Minute, log); err != nil {
+				errLock.Lock()
+				errs = append(errs, err)
+				errLock.Unlock()
+				return
+			}
+		}(volumeName, snapshotID)
 	}
 
+	wg.Wait()
 	return kerrs.NewAggregate(errs)
 }
 

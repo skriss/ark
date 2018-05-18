@@ -15,7 +15,7 @@ if [ -n "$(ls -A $RESTORE_DIR)" ]; then
 fi
 
 # cleanup
-rm -rf /restores/$1
+rm -rf "$RESTORE_DIR"
 
 # write the done file for the init container to pick up
 mkdir -p "$VOLUME_DIR"/.ark && touch "$VOLUME_DIR"/.ark/$3
