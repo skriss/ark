@@ -30,7 +30,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/defaults"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -496,15 +495,7 @@ func durationMin(a, b time.Duration) time.Duration {
 
 func (s *server) initRestic(config api.ObjectStorageProviderConfig) error {
 	// set the env vars that restic uses for creds purposes
-	switch restic.BackendType(config.Name) {
-	case restic.AWSBackend:
-		creds, err := defaults.Get().Config.Credentials.Get()
-		if err != nil {
-			return errors.WithStack(err)
-		}
-		os.Setenv("AWS_ACCESS_KEY_ID", creds.AccessKeyID)
-		os.Setenv("AWS_SECRET_ACCESS_KEY", creds.SecretAccessKey)
-	case restic.AzureBackend:
+	if config.Name == string(restic.AzureBackend) {
 		os.Setenv("AZURE_ACCOUNT_NAME", os.Getenv("AZURE_STORAGE_ACCOUNT_ID"))
 		os.Setenv("AZURE_ACCOUNT_KEY", os.Getenv("AZURE_STORAGE_KEY"))
 	}
