@@ -1,0 +1,54 @@
+# Copyright 2018 the Heptio Ark contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: 
+  name: restic-daemon
+  namespace: heptio-ark
+spec:
+  selector:
+    matchLabels:
+      name: restic-daemon
+  template:
+    metadata:
+      labels:
+        name: restic-daemon
+    spec:
+      serviceAccountName: ark
+      volumes:
+        - name: cloud-credentials
+          secret:
+            secretName: cloud-credentials
+        - name: host-pods
+          hostPath:
+            path: /var/lib/kubelet/pods
+      containers:
+        - image: gcr.io/steve-heptio/restic:latest
+          name: restic
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: cloud-credentials
+              mountPath: /credentials
+            - name: host-pods
+              mountPath: /host_pods
+          env:
+            - name: HEPTIO_ARK_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /credentials/cloud

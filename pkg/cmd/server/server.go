@@ -502,8 +502,7 @@ func (s *server) initRestic(config api.ObjectStorageProviderConfig) error {
 
 	s.resticManager = restic.NewRepositoryManager(
 		s.objectStore,
-		restic.BackendType(config.Name),
-		config.ResticLocation,
+		config,
 		s.kubeClient.CoreV1().Secrets(s.namespace),
 		s.logger,
 	)

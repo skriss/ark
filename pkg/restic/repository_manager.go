@@ -36,6 +36,7 @@ import (
 	kerrs "k8s.io/apimachinery/pkg/util/errors"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
+	arkv1api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/cloudprovider"
 )
 
@@ -55,7 +56,6 @@ type RepositoryManager interface {
 
 type repositoryManager struct {
 	objectStore   cloudprovider.ObjectStore
-	backendType   BackendType
 	bucket        string
 	secretsClient corev1client.SecretInterface
 	log           logrus.FieldLogger
@@ -76,18 +76,24 @@ const (
 )
 
 // NewRepositoryManager constructs a RepositoryManager.
-func NewRepositoryManager(objectStore cloudprovider.ObjectStore, backendType BackendType, bucket string, secretsClient corev1client.SecretInterface, log logrus.FieldLogger) RepositoryManager {
+func NewRepositoryManager(objectStore cloudprovider.ObjectStore, config arkv1api.ObjectStorageProviderConfig, secretsClient corev1client.SecretInterface, log logrus.FieldLogger) RepositoryManager {
 	rm := &repositoryManager{
 		objectStore:   objectStore,
-		backendType:   backendType,
-		bucket:        bucket,
+		bucket:        config.ResticLocation,
 		secretsClient: secretsClient,
 		log:           log,
 	}
 
-	switch rm.backendType {
+	switch BackendType(config.Name) {
 	case AWSBackend:
-		rm.repoPrefix = "s3:s3.amazonaws.com/" + rm.bucket
+		url := "s3.amazonaws.com"
+
+		// non-AWS, S3-compatible object store
+		if config.Config != nil && config.Config["s3Url"] != "" {
+			url = config.Config["s3Url"]
+		}
+
+		rm.repoPrefix = fmt.Sprintf("s3:%s/%s", url, rm.bucket)
 	case AzureBackend:
 		rm.repoPrefix = "azure:" + rm.bucket + ":"
 	case GCPBackend:
