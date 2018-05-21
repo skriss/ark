@@ -92,51 +92,73 @@ func (br *backupperRestorer) BackupPodVolumes(backup *arkv1api.Backup, pod *core
 		}
 	}
 
-	var errs []error
+	var (
+		errs []error
+		lock sync.Mutex
+		wg   sync.WaitGroup
+	)
+
 	// for each volume to backup:
 	for _, volumeName := range volumesToBackup {
-		volume := getVolume(pod, volumeName)
-		if volume == nil {
-			errs = append(errs, errors.Errorf("volume %s does not exist in pod %s", volumeName, kube.NamespaceAndName(pod)))
-			continue
-		}
+		wg.Add(1)
+		go func(volumeName string) {
+			defer wg.Done()
 
-		// get the volume's directory name under /var/lib/kubelet/pods/... on the host
-		volumeDir, err := getVolumeDirectory(volume, pod.Namespace, br.pvcGetter)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
+			volume := getVolume(pod, volumeName)
+			if volume == nil {
+				lock.Lock()
+				errs = append(errs, errors.Errorf("volume %s does not exist in pod %s", volumeName, kube.NamespaceAndName(pod)))
+				lock.Unlock()
+				return
+			}
 
-		// assemble restic backup command
-		snapshotTags := map[string]string{
-			"backup":     backup.Name,
-			"backup-uid": string(backup.UID),
-			"pod":        pod.Name,
-			"pod-uid":    string(pod.UID),
-			"ns":         pod.Namespace,
-			"volume":     volumeName,
-		}
+			// get the volume's directory name under /var/lib/kubelet/pods/... on the host
+			volumeDir, err := getVolumeDirectory(volume, pod.Namespace, br.pvcGetter)
+			if err != nil {
+				lock.Lock()
+				errs = append(errs, err)
+				lock.Unlock()
+				return
+			}
 
-		cmd := backupCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), volumeDir, snapshotTags)
+			// assemble restic backup command
+			snapshotTags := map[string]string{
+				"backup":     backup.Name,
+				"backup-uid": string(backup.UID),
+				"pod":        pod.Name,
+				"pod-uid":    string(pod.UID),
+				"ns":         pod.Namespace,
+				"volume":     volumeName,
+			}
 
-		// exec it in the daemonset pod
-		if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, 10*time.Minute, log); err != nil {
-			errs = append(errs, err)
-			continue
-		}
+			cmd := backupCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), volumeDir, snapshotTags)
 
-		// get the snapshot's ID
-		snapshotID, err := br.metadataManager.GetSnapshotID(pod.Namespace, string(backup.UID), string(pod.UID), volumeName)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
+			// exec it in the daemonset pod
+			if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, 10*time.Minute, log); err != nil {
+				lock.Lock()
+				errs = append(errs, err)
+				lock.Unlock()
+				return
+			}
 
-		// save the snapshot's ID in the pod annotation
-		SetPodSnapshotAnnotation(pod, volumeName, snapshotID)
-		backupSnapshots = append(backupSnapshots, fmt.Sprintf("%s/%s", pod.Namespace, snapshotID))
+			// get the snapshot's ID
+			snapshotID, err := br.metadataManager.GetSnapshotID(pod.Namespace, string(backup.UID), string(pod.UID), volumeName)
+			if err != nil {
+				lock.Lock()
+				errs = append(errs, err)
+				lock.Unlock()
+				return
+			}
+
+			// save the snapshot's ID in the pod annotation
+			lock.Lock()
+			SetPodSnapshotAnnotation(pod, volumeName, snapshotID)
+			backupSnapshots = append(backupSnapshots, fmt.Sprintf("%s/%s", pod.Namespace, snapshotID))
+			lock.Unlock()
+		}(volumeName)
 	}
+
+	wg.Wait()
 
 	// only write the backup annotation if we had at least one successful snapshot
 	if len(backupSnapshots) > 0 {
