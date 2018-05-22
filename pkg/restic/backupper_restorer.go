@@ -18,7 +18,6 @@ package restic
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -93,74 +92,26 @@ func (br *backupperRestorer) BackupPodVolumes(backup *arkv1api.Backup, pod *core
 	}
 
 	var (
-		errs []error
-		lock sync.Mutex
-		wg   sync.WaitGroup
+		errs       []error
+		resultChan = make(chan backupResult)
 	)
 
-	// for each volume to backup:
 	for _, volumeName := range volumesToBackup {
-		wg.Add(1)
-		go func(volumeName string) {
-			defer wg.Done()
-
-			volume := getVolume(pod, volumeName)
-			if volume == nil {
-				lock.Lock()
-				errs = append(errs, errors.Errorf("volume %s does not exist in pod %s", volumeName, kube.NamespaceAndName(pod)))
-				lock.Unlock()
-				return
-			}
-
-			// get the volume's directory name under /var/lib/kubelet/pods/... on the host
-			volumeDir, err := getVolumeDirectory(volume, pod.Namespace, br.pvcGetter)
-			if err != nil {
-				lock.Lock()
-				errs = append(errs, err)
-				lock.Unlock()
-				return
-			}
-
-			// assemble restic backup command
-			snapshotTags := map[string]string{
-				"backup":     backup.Name,
-				"backup-uid": string(backup.UID),
-				"pod":        pod.Name,
-				"pod-uid":    string(pod.UID),
-				"ns":         pod.Namespace,
-				"volume":     volumeName,
-			}
-
-			cmd := backupCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), volumeDir, snapshotTags)
-
-			// exec it in the daemonset pod
-			if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, 10*time.Minute, log); err != nil {
-				lock.Lock()
-				errs = append(errs, err)
-				lock.Unlock()
-				return
-			}
-
-			// get the snapshot's ID
-			snapshotID, err := br.metadataManager.GetSnapshotID(pod.Namespace, string(backup.UID), string(pod.UID), volumeName)
-			if err != nil {
-				lock.Lock()
-				errs = append(errs, err)
-				lock.Unlock()
-				return
-			}
-
-			// save the snapshot's ID in the pod annotation
-			lock.Lock()
-			SetPodSnapshotAnnotation(pod, volumeName, snapshotID)
-			backupSnapshots = append(backupSnapshots, fmt.Sprintf("%s/%s", pod.Namespace, snapshotID))
-			lock.Unlock()
-		}(volumeName)
+		go br.backupVolume(backup, pod, volumeName, resultChan, log)
 	}
 
-	wg.Wait()
+	for i := 0; i < len(volumesToBackup); i++ {
+		res := <-resultChan
+		switch {
+		case res.err != nil:
+			errs = append(errs, res.err)
+		default:
+			SetPodSnapshotAnnotation(pod, res.volumeName, res.snapshotID)
+			backupSnapshots = append(backupSnapshots, res.snapshotID)
+		}
+	}
 
-	// only write the backup annotation if we had at least one successful snapshot
+	// only write the backup annotation if we have at least one snapshot
 	if len(backupSnapshots) > 0 {
 		// update backup's annotations with all snapshot IDs
 		if err := SetSnapshotsInBackup(backup, backupSnapshots); err != nil {
@@ -171,6 +122,54 @@ func (br *backupperRestorer) BackupPodVolumes(backup *arkv1api.Backup, pod *core
 	return kerrs.NewAggregate(errs)
 }
 
+type backupResult struct {
+	volumeName string
+	snapshotID string
+	err        error
+}
+
+func (br *backupperRestorer) backupVolume(backup *arkv1api.Backup, pod *corev1api.Pod, volumeName string, resultChan chan<- backupResult, log logrus.FieldLogger) {
+	volume := getVolume(pod, volumeName)
+	if volume == nil {
+		resultChan <- backupResult{err: errors.Errorf("volume %s does not exist in pod %s", volumeName, kube.NamespaceAndName(pod))}
+		return
+	}
+
+	// get the volume's directory name under /var/lib/kubelet/pods/... on the host
+	volumeDir, err := getVolumeDirectory(volume, pod.Namespace, br.pvcGetter)
+	if err != nil {
+		resultChan <- backupResult{err: err}
+		return
+	}
+
+	// assemble restic backup command
+	snapshotTags := map[string]string{
+		"backup":     backup.Name,
+		"backup-uid": string(backup.UID),
+		"pod":        pod.Name,
+		"pod-uid":    string(pod.UID),
+		"ns":         pod.Namespace,
+		"volume":     volumeName,
+	}
+
+	cmd := backupCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), volumeDir, snapshotTags)
+
+	// exec it in the daemonset pod
+	if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, 10*time.Minute, log); err != nil {
+		resultChan <- backupResult{err: err}
+		return
+	}
+
+	// get the snapshot's ID
+	snapshotID, err := br.metadataManager.GetSnapshotID(pod.Namespace, string(backup.UID), string(pod.UID), volumeName)
+	if err != nil {
+		resultChan <- backupResult{err: err}
+		return
+	}
+
+	resultChan <- backupResult{volumeName: volumeName, snapshotID: fmt.Sprintf("%s/%s", pod.Namespace, snapshotID)}
+}
+
 func (br *backupperRestorer) RestorePodVolumes(restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error {
 	// get volumes to restore from pod's annotations
 	volumesToRestore := GetPodSnapshotAnnotations(pod)
@@ -179,59 +178,56 @@ func (br *backupperRestorer) RestorePodVolumes(restore *arkv1api.Restore, pod *c
 	}
 
 	var (
-		errs    []error
-		errLock sync.Mutex
-		wg      sync.WaitGroup
+		errs       []error
+		resultChan = make(chan error)
 	)
 
 	// for each volume to restore:
 	for volumeName, snapshotID := range volumesToRestore {
-		wg.Add(1)
-		go func(volumeName, snapshotID string) {
-			defer wg.Done()
-
-			// confirm it exists in the pod
-			volume := getVolume(pod, volumeName)
-			if volume == nil {
-				errLock.Lock()
-				errs = append(errs, errors.Errorf("volume %s does not exist in pod %s", volumeName, kube.NamespaceAndName(pod)))
-				errLock.Unlock()
-				return
-			}
-
-			// get the volume's directory name under /var/lib/kubelet/pods/... on the host
-			volumeDir, err := getVolumeDirectory(volume, pod.Namespace, br.pvcGetter)
-			if err != nil {
-				errLock.Lock()
-				errs = append(errs, err)
-				errLock.Unlock()
-				return
-			}
-
-			// assemble restic restore command
-			cmd := restoreCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), snapshotID)
-
-			// exec it in the daemonset pod
-			if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, 10*time.Minute, log); err != nil {
-				errLock.Lock()
-				errs = append(errs, err)
-				errLock.Unlock()
-				return
-			}
-
-			// exec the post-restore command (copy contents into target dir, write done file)
-			cmd = []string{"/complete-restore.sh", string(pod.UID), volumeDir, string(restore.UID)}
-			if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, time.Minute, log); err != nil {
-				errLock.Lock()
-				errs = append(errs, err)
-				errLock.Unlock()
-				return
-			}
-		}(volumeName, snapshotID)
+		go br.restoreVolume(restore, pod, volumeName, snapshotID, resultChan, log)
 	}
 
-	wg.Wait()
+	for i := 0; i < len(volumesToRestore); i++ {
+		if err := <-resultChan; err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	return kerrs.NewAggregate(errs)
+}
+
+func (br *backupperRestorer) restoreVolume(restore *arkv1api.Restore, pod *corev1api.Pod, volumeName, snapshotID string, resultChan chan<- error, log logrus.FieldLogger) {
+	// confirm it exists in the pod
+	volume := getVolume(pod, volumeName)
+	if volume == nil {
+		resultChan <- errors.Errorf("volume %s does not exist in pod %s", volumeName, kube.NamespaceAndName(pod))
+		return
+	}
+
+	// get the volume's directory name under /var/lib/kubelet/pods/... on the host
+	volumeDir, err := getVolumeDirectory(volume, pod.Namespace, br.pvcGetter)
+	if err != nil {
+		resultChan <- err
+		return
+	}
+
+	// assemble restic restore command
+	cmd := restoreCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), snapshotID)
+
+	// exec it in the daemonset pod
+	if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, 10*time.Minute, log); err != nil {
+		resultChan <- err
+		return
+	}
+
+	// exec the post-restore command (copy contents into target dir, write done file)
+	cmd = []string{"/complete-restore.sh", string(pod.UID), volumeDir, string(restore.UID)}
+	if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, time.Minute, log); err != nil {
+		resultChan <- err
+		return
+	}
+
+	resultChan <- nil
 }
 
 func getVolume(pod *corev1api.Pod, volumeName string) *corev1api.Volume {
