@@ -53,11 +53,11 @@ func (c *command) Command() *exec.Cmd {
 }
 
 func repoFlag(prefix, repo string) string {
-	return fmt.Sprintf("-r=%s/%s", prefix, repo)
+	return fmt.Sprintf("--repo=%s/%s", prefix, repo)
 }
 
 func passwordFlag(file string) string {
-	return fmt.Sprintf("-p=%s", file)
+	return fmt.Sprintf("--password-file=%s", file)
 }
 
 func backupTagFlags(vals map[string]string) []string {
@@ -69,5 +69,5 @@ func backupTagFlags(vals map[string]string) []string {
 }
 
 func restoreTargetFlag(podUID string) string {
-	return fmt.Sprintf("-t=/restores/%s", podUID)
+	return fmt.Sprintf("--target=/restores/%s", podUID)
 }

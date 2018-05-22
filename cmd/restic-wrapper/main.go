@@ -17,7 +17,7 @@ import (
 func main() {
 	repo := repoName(os.Args[1:])
 	if repo == "" {
-		checkError(errors.New("repository flag (-r) not found"), "ERROR getting repository name")
+		checkError(errors.New("repository flag (--repo) not found"), "ERROR getting repository name")
 	}
 
 	ns := os.Getenv("HEPTIO_ARK_NAMESPACE")
@@ -39,7 +39,7 @@ func main() {
 	os.Setenv("AZURE_ACCOUNT_NAME", os.Getenv("AZURE_STORAGE_ACCOUNT_ID"))
 	os.Setenv("AZURE_ACCOUNT_KEY", os.Getenv("AZURE_STORAGE_KEY"))
 
-	resticArgs := append([]string{"-p=" + passwordFile}, os.Args[1:]...)
+	resticArgs := append([]string{"--password-file=" + passwordFile}, os.Args[1:]...)
 	resticCmd := exec.Command("/restic", resticArgs...)
 	resticCmd.Stdout = os.Stdout
 	resticCmd.Stderr = os.Stderr
@@ -49,7 +49,7 @@ func main() {
 
 func repoName(args []string) string {
 	for _, arg := range args {
-		if strings.HasPrefix(arg, "-r=") {
+		if strings.HasPrefix(arg, "--repo=") {
 			return arg[strings.LastIndex(arg, "/")+1:]
 		}
 	}
