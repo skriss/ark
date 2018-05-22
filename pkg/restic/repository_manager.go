@@ -52,6 +52,11 @@ type RepositoryManager interface {
 
 	GetSnapshotID(repo, backupUID, podUID, volume string) (string, error)
 	Forget(repo, snapshotID string) error
+
+	Lock(repo string)
+	Unlock(repo string)
+	RLock(repo string)
+	RUnlock(repo string)
 }
 
 type repositoryManager struct {
@@ -60,6 +65,7 @@ type repositoryManager struct {
 	secretsClient corev1client.SecretInterface
 	log           logrus.FieldLogger
 	repoPrefix    string
+	*repoLocker
 }
 
 type BackendType string
@@ -82,6 +88,7 @@ func NewRepositoryManager(objectStore cloudprovider.ObjectStore, config arkv1api
 		bucket:        config.ResticLocation,
 		secretsClient: secretsClient,
 		log:           log,
+		repoLocker:    newRepoLocker(),
 	}
 
 	switch BackendType(config.Name) {
@@ -123,6 +130,9 @@ func (rm *repositoryManager) RepositoryExists(name string) (bool, error) {
 }
 
 func (rm *repositoryManager) InitRepo(name string) error {
+	rm.Lock(name)
+	defer rm.Unlock(name)
+
 	resticCreds, err := rm.secretsClient.Get(credsSecret, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		secret := &corev1api.Secret{
@@ -291,6 +301,9 @@ func (rm *repositoryManager) PruneAllRepos() error {
 }
 
 func (rm *repositoryManager) CheckRepo(name string) error {
+	rm.Lock(name)
+	defer rm.Unlock(name)
+
 	cmd := &command{
 		baseName:   "/restic",
 		command:    "check",
@@ -302,6 +315,9 @@ func (rm *repositoryManager) CheckRepo(name string) error {
 }
 
 func (rm *repositoryManager) PruneRepo(name string) error {
+	rm.Lock(name)
+	defer rm.Unlock(name)
+
 	cmd := &command{
 		baseName:   "/restic",
 		command:    "prune",
@@ -313,6 +329,9 @@ func (rm *repositoryManager) PruneRepo(name string) error {
 }
 
 func (rm *repositoryManager) GetSnapshotID(repo, backupUID, podUID, volume string) (string, error) {
+	rm.RLock(repo)
+	defer rm.RUnlock(repo)
+
 	tagFilters := []string{
 		"ns=" + repo,
 		"pod-uid=" + podUID,
@@ -349,6 +368,9 @@ func (rm *repositoryManager) GetSnapshotID(repo, backupUID, podUID, volume strin
 }
 
 func (rm *repositoryManager) Forget(repo, snapshotID string) error {
+	rm.Lock(repo)
+	defer rm.Unlock(repo)
+
 	cmd := &command{
 		baseName:   "/restic",
 		command:    "forget",

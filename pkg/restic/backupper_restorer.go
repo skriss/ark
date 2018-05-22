@@ -154,8 +154,7 @@ func (br *backupperRestorer) backupVolume(backup *arkv1api.Backup, pod *corev1ap
 
 	cmd := backupCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), volumeDir, snapshotTags)
 
-	// exec it in the daemonset pod
-	if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, 10*time.Minute, log); err != nil {
+	if err := br.exec(pod.Spec.NodeName, pod.Namespace, cmd, 10*time.Minute, log); err != nil {
 		resultChan <- backupResult{err: err}
 		return
 	}
@@ -168,6 +167,13 @@ func (br *backupperRestorer) backupVolume(backup *arkv1api.Backup, pod *corev1ap
 	}
 
 	resultChan <- backupResult{volumeName: volumeName, snapshotID: fmt.Sprintf("%s/%s", pod.Namespace, snapshotID)}
+}
+
+func (br *backupperRestorer) exec(node, namespace string, cmd []string, timeout time.Duration, log logrus.FieldLogger) error {
+	br.metadataManager.RLock(namespace)
+	defer br.metadataManager.RUnlock(namespace)
+
+	return br.daemonSetExecutor.Exec(node, cmd, timeout, log)
 }
 
 func (br *backupperRestorer) RestorePodVolumes(restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error {
@@ -214,8 +220,7 @@ func (br *backupperRestorer) restoreVolume(restore *arkv1api.Restore, pod *corev
 	// assemble restic restore command
 	cmd := restoreCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), snapshotID)
 
-	// exec it in the daemonset pod
-	if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, 10*time.Minute, log); err != nil {
+	if err := br.exec(pod.Spec.NodeName, pod.Namespace, cmd, 10*time.Minute, log); err != nil {
 		resultChan <- err
 		return
 	}
