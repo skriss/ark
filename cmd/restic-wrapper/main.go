@@ -17,36 +17,37 @@ import (
 func main() {
 	repo := repoName(os.Args[1:])
 	if repo == "" {
-		checkError(errors.New("repository flag (--repo) not found"), "ERROR getting repository name")
+		checkError("ERROR getting repository name", errors.New("repository flag (--repo) not found"))
 	}
 
 	ns := os.Getenv("HEPTIO_ARK_NAMESPACE")
 	if ns == "" {
-		checkError(errors.New("HEPTIO_ARK_NAMESPACE environment variable not found"), "ERROR getting heptio ark namespace")
+		checkError("ERROR getting heptio ark namespace", errors.New("HEPTIO_ARK_NAMESPACE environment variable not found"))
 	}
 
 	secrets, err := secretInterface(ns)
-	checkError(err, "ERROR getting secrets interface")
+	checkError("ERROR getting secrets interface", err)
 
 	secret, err := secrets.Get("restic-credentials", metav1.GetOptions{})
-	checkError(err, "ERROR getting heptio-ark/restic-credentials secret")
+	checkError("ERROR getting heptio-ark/restic-credentials secret", err)
 
 	passwordFile, err := createPasswordFile(secret, repo)
-	checkError(err, "ERROR creating password temp file")
+	checkError("ERROR creating password temp file", err)
 	defer os.Remove(passwordFile)
-
-	// set the env vars that restic uses for azure credentials
-	os.Setenv("AZURE_ACCOUNT_NAME", os.Getenv("AZURE_STORAGE_ACCOUNT_ID"))
-	os.Setenv("AZURE_ACCOUNT_KEY", os.Getenv("AZURE_STORAGE_KEY"))
 
 	resticArgs := append([]string{"--password-file=" + passwordFile}, os.Args[1:]...)
 	resticCmd := exec.Command("/restic", resticArgs...)
 	resticCmd.Stdout = os.Stdout
 	resticCmd.Stderr = os.Stderr
 
-	checkError(resticCmd.Run(), "ERROR running restic command")
+	checkError("ERROR running restic command", resticCmd.Run())
 }
 
+// repoName parses the restic repo name from a standard restic --repo
+// flag, e.g.:
+//		s3:s3.amazonaws.com/<bucket>/<repo>
+//		azure:<container>:/<repo>
+//		gs:<bucket>:/<repo>
 func repoName(args []string) string {
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "--repo=") {
@@ -74,9 +75,9 @@ func secretInterface(namespace string) (corev1client.SecretInterface, error) {
 // checkError prints an error message and the error's text to stderr and
 // exits with a status code of 1 if the error is not nil, or is a no-op
 // otherwise.
-func checkError(err error, msg string) {
+func checkError(msg string, err error) {
 	if err != nil {
-		fmt.Fprintf(os.Stderr, msg+": %s\n", err)
+		fmt.Fprintf(os.Stderr, msg+": %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -86,12 +87,12 @@ func createPasswordFile(secret *corev1api.Secret, repo string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
 
 	_, err = file.Write(secret.Data[repo])
 	if err != nil {
+		file.Close()
 		return "", err
 	}
 
-	return file.Name(), nil
+	return file.Name(), file.Close()
 }
