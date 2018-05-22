@@ -200,7 +200,7 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 			return err
 		}
 
-		// pod was permuted by BackupPodVolumes if there were any volumes backed up, so
+		// pod was modified by BackupPodVolumes if there were any volumes backed up, so
 		// convert it back to unstructured and assign to obj. so it gets persisted.
 		unstructuredObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod)
 		if err != nil {

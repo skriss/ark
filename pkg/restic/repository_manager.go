@@ -202,10 +202,7 @@ func (rm *repositoryManager) getAllRepos() ([]string, error) {
 		}
 
 		// strip the trailing '/' if it exists
-		if prefix[len(prefix)-1] == '/' {
-			prefix = prefix[0 : len(prefix)-1]
-		}
-		repos = append(repos, prefix)
+		repos = append(repos, strings.TrimSuffix(prefix, "/"))
 	}
 
 	return repos, nil
