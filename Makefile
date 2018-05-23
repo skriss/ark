@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # The binary to build (just the basename).
-BIN := ark
+BIN ?= ark
 
 # This repo's root import path (under GOPATH).
 PKG := github.com/heptio/ark
@@ -44,7 +44,7 @@ GOARCH = $(word 2, $(platform_temp))
 # TODO(ncdc): support multiple image architectures once gcr.io supports manifest lists
 # Set default base image dynamically for each arch
 ifeq ($(GOARCH),amd64)
-		DOCKERFILE ?= Dockerfile.alpine
+		DOCKERFILE ?= Dockerfile-$(BIN).alpine
 endif
 #ifeq ($(GOARCH),arm)
 #		DOCKERFILE ?= Dockerfile.arm #armel/busybox
@@ -58,7 +58,10 @@ IMAGE := $(REGISTRY)/$(BIN)
 # If you want to build all binaries, see the 'all-build' rule.
 # If you want to build all containers, see the 'all-container' rule.
 # If you want to build AND push all containers, see the 'all-push' rule.
-all: build
+all: 
+	@$(MAKE) build
+	@$(MAKE) build BIN=restic-init-container
+	@$(MAKE) build BIN=restic-wrapper
 
 build-%:
 	@$(MAKE) --no-print-directory ARCH=$* build
@@ -110,11 +113,17 @@ shell: build-dirs build-image
 
 DOTFILE_IMAGE = $(subst :,_,$(subst /,_,$(IMAGE))-$(VERSION))
 
+all-containers:
+	$(MAKE) container
+	$(MAKE) container BIN=restic-init-container
+	$(MAKE) container BIN=restic-wrapper
+
 container: verify test .container-$(DOTFILE_IMAGE) container-name
 .container-$(DOTFILE_IMAGE): _output/bin/$(GOOS)/$(GOARCH)/$(BIN) $(DOCKERFILE)
-	@cp restic-container/restic _output/
-	@cp $(DOCKERFILE) _output/.dockerfile-$(GOOS)-$(GOARCH)
-	@docker build -t $(IMAGE):$(VERSION) -f _output/.dockerfile-$(GOOS)-$(GOARCH) _output
+	@# TODO this is ugly
+	@cp restic-container/complete-restore.sh _output/
+	@cp $(DOCKERFILE) _output/.dockerfile-$(BIN)-$(GOOS)-$(GOARCH)
+	@docker build -t $(IMAGE):$(VERSION) -f _output/.dockerfile-$(BIN)-$(GOOS)-$(GOARCH) _output
 	@docker images -q $(IMAGE):$(VERSION) > $@
 
 container-name:
@@ -183,4 +192,4 @@ clean:
 	rm -rf .go _output
 	docker rmi $(BUILDER_IMAGE)
 
-ci: build verify test
+ci: all verify test
