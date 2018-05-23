@@ -50,6 +50,14 @@ type DownloadRequestListerExpansion interface{}
 // DownloadRequestNamespaceLister.
 type DownloadRequestNamespaceListerExpansion interface{}
 
+// PodVolumeBackupListerExpansion allows custom methods to be added to
+// PodVolumeBackupLister.
+type PodVolumeBackupListerExpansion interface{}
+
+// PodVolumeBackupNamespaceListerExpansion allows custom methods to be added to
+// PodVolumeBackupNamespaceLister.
+type PodVolumeBackupNamespaceListerExpansion interface{}
+
 // RestoreListerExpansion allows custom methods to be added to
 // RestoreLister.
 type RestoreListerExpansion interface{}

@@ -26,6 +26,8 @@ type DeleteBackupRequestExpansion interface{}
 
 type DownloadRequestExpansion interface{}
 
+type PodVolumeBackupExpansion interface{}
+
 type RestoreExpansion interface{}
 
 type ScheduleExpansion interface{}
