@@ -48,6 +48,10 @@ func (c *FakeArkV1) PodVolumeBackups(namespace string) v1.PodVolumeBackupInterfa
 	return &FakePodVolumeBackups{c, namespace}
 }
 
+func (c *FakeArkV1) PodVolumeRestores(namespace string) v1.PodVolumeRestoreInterface {
+	return &FakePodVolumeRestores{c, namespace}
+}
+
 func (c *FakeArkV1) Restores(namespace string) v1.RestoreInterface {
 	return &FakeRestores{c, namespace}
 }

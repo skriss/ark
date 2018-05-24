@@ -57,6 +57,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&DeleteBackupRequestList{},
 		&PodVolumeBackup{},
 		&PodVolumeBackupList{},
+		&PodVolumeRestore{},
+		&PodVolumeRestoreList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

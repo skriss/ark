@@ -58,6 +58,14 @@ type PodVolumeBackupListerExpansion interface{}
 // PodVolumeBackupNamespaceLister.
 type PodVolumeBackupNamespaceListerExpansion interface{}
 
+// PodVolumeRestoreListerExpansion allows custom methods to be added to
+// PodVolumeRestoreLister.
+type PodVolumeRestoreListerExpansion interface{}
+
+// PodVolumeRestoreNamespaceListerExpansion allows custom methods to be added to
+// PodVolumeRestoreNamespaceLister.
+type PodVolumeRestoreNamespaceListerExpansion interface{}
+
 // RestoreListerExpansion allows custom methods to be added to
 // RestoreLister.
 type RestoreListerExpansion interface{}
