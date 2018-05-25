@@ -13,20 +13,22 @@ func newRepoLocker() *repoLocker {
 	}
 }
 
-func (rl *repoLocker) RLock(name string) {
-	rl.ensureLock(name).RLock()
+func (rl *repoLocker) Lock(name string, exclusive bool) {
+	switch exclusive {
+	case true:
+		rl.ensureLock(name).Lock()
+	case false:
+		rl.ensureLock(name).RLock()
+	}
 }
 
-func (rl *repoLocker) RUnlock(name string) {
-	rl.ensureLock(name).RUnlock()
-}
-
-func (rl *repoLocker) Lock(name string) {
-	rl.ensureLock(name).Lock()
-}
-
-func (rl *repoLocker) Unlock(name string) {
-	rl.ensureLock(name).Unlock()
+func (rl *repoLocker) Unlock(name string, exclusive bool) {
+	switch exclusive {
+	case true:
+		rl.ensureLock(name).Unlock()
+	case false:
+		rl.ensureLock(name).RUnlock()
+	}
 }
 
 func (rl *repoLocker) ensureLock(name string) *sync.RWMutex {

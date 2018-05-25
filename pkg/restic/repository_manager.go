@@ -17,6 +17,7 @@ limitations under the License.
 package restic
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -35,9 +36,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kerrs "k8s.io/apimachinery/pkg/util/errors"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/tools/cache"
 
 	arkv1api "github.com/heptio/ark/pkg/apis/ark/v1"
 	"github.com/heptio/ark/pkg/cloudprovider"
+	clientset "github.com/heptio/ark/pkg/generated/clientset/versioned"
+	arkv1informers "github.com/heptio/ark/pkg/generated/informers/externalversions/ark/v1"
+	"github.com/heptio/ark/pkg/util/boolptr"
 )
 
 // TODO this is more like a metadata manager
@@ -51,19 +56,18 @@ type RepositoryManager interface {
 	PruneAllRepos() error
 	Forget(repo, snapshotID string) error
 
-	Lock(repo string)
-	Unlock(repo string)
-	RLock(repo string)
-	RUnlock(repo string)
+	Backupper
+	Restorer
 }
 
-type repositoryManager struct {
-	objectStore   cloudprovider.ObjectStore
-	bucket        string
-	secretsClient corev1client.SecretInterface
-	log           logrus.FieldLogger
-	repoPrefix    string
-	*repoLocker
+// Backupper can execute restic backups of volumes in a pod.
+type Backupper interface {
+	BackupPodVolumes(ctx context.Context, backup *arkv1api.Backup, pod *corev1api.Pod, log logrus.FieldLogger) error
+}
+
+// Restorer can execute restic restores of volumes in a pod.
+type Restorer interface {
+	RestorePodVolumes(ctx context.Context, restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error
 }
 
 type BackendType string
@@ -72,18 +76,32 @@ const (
 	AWSBackend   BackendType = "aws"
 	AzureBackend BackendType = "azure"
 	GCPBackend   BackendType = "gcp"
+
+	credsSecret = "restic-credentials"
 )
 
-const (
-	credsSecret   = "restic-credentials"
-	credsFilePath = "/restic-credentials/%s"
-)
+type repositoryManager struct {
+	objectStore   cloudprovider.ObjectStore
+	bucket        string
+	arkClient     clientset.Interface
+	secretsClient corev1client.SecretInterface
+	log           logrus.FieldLogger
+	repoPrefix    string
+	repoLocker    *repoLocker
+}
 
 // NewRepositoryManager constructs a RepositoryManager.
-func NewRepositoryManager(objectStore cloudprovider.ObjectStore, config arkv1api.ObjectStorageProviderConfig, secretsClient corev1client.SecretInterface, log logrus.FieldLogger) RepositoryManager {
+func NewRepositoryManager(
+	objectStore cloudprovider.ObjectStore,
+	config arkv1api.ObjectStorageProviderConfig,
+	arkClient clientset.Interface,
+	secretsClient corev1client.SecretInterface,
+	log logrus.FieldLogger,
+) RepositoryManager {
 	rm := &repositoryManager{
 		objectStore:   objectStore,
 		bucket:        config.ResticLocation,
+		arkClient:     arkClient,
 		secretsClient: secretsClient,
 		log:           log,
 		repoLocker:    newRepoLocker(),
@@ -108,6 +126,209 @@ func NewRepositoryManager(objectStore cloudprovider.ObjectStore, config arkv1api
 	return rm
 }
 
+func (rm *repositoryManager) BackupPodVolumes(ctx context.Context, backup *arkv1api.Backup, pod *corev1api.Pod, log logrus.FieldLogger) error {
+	// get volumes to backup from pod's annotations
+	volumesToBackup := GetVolumesToBackup(pod)
+	if len(volumesToBackup) == 0 {
+		return nil
+	}
+
+	// ensure a repo exists for the pod's namespace
+	exists, err := rm.RepositoryExists(pod.Namespace)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if err := rm.InitRepo(pod.Namespace); err != nil {
+			return err
+		}
+	}
+
+	resultChan := make(chan *arkv1api.PodVolumeBackup)
+
+	informer := arkv1informers.NewFilteredPodVolumeBackupInformer(
+		rm.arkClient,
+		backup.Namespace,
+		0,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+		func(opts *metav1.ListOptions) { opts.LabelSelector = "ark.heptio.com/backup=" + backup.Name },
+	)
+	informer.AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			UpdateFunc: func(_, obj interface{}) {
+				pvb := obj.(*arkv1api.PodVolumeBackup)
+
+				if pvb.Status.Phase == arkv1api.PodVolumeBackupPhaseCompleted || pvb.Status.Phase == arkv1api.PodVolumeBackupPhaseFailed {
+					resultChan <- pvb
+				}
+			},
+		},
+	)
+	go informer.Run(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+		return errors.New("timed out waiting for cache to sync")
+	}
+
+	for _, volumeName := range volumesToBackup {
+		rm.repoLocker.Lock(pod.Namespace, false)
+		defer rm.repoLocker.Unlock(pod.Namespace, false)
+
+		volumeBackup := &arkv1api.PodVolumeBackup{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:    backup.Namespace,
+				GenerateName: backup.Name + "-",
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: arkv1api.SchemeGroupVersion.String(),
+						Kind:       "Backup",
+						Name:       backup.Name,
+						UID:        backup.UID,
+						Controller: boolptr.True(),
+					},
+				},
+				Labels: map[string]string{
+					"ark.heptio.com/backup": backup.Name,
+				},
+			},
+			Spec: arkv1api.PodVolumeBackupSpec{
+				Node: pod.Spec.NodeName,
+				Pod: corev1api.ObjectReference{
+					Kind:      "Pod",
+					Namespace: pod.Namespace,
+					Name:      pod.Name,
+					UID:       pod.UID,
+				},
+				Volume: volumeName,
+				Tags: map[string]string{
+					"backup":     backup.Name,
+					"backup-uid": string(backup.UID),
+					"pod":        pod.Name,
+					"pod-uid":    string(pod.UID),
+					"ns":         pod.Namespace,
+					"volume":     volumeName,
+				},
+				RepoPrefix: rm.repoPrefix,
+			},
+		}
+
+		// TODO should we return here, or continue with what we can?
+		if err := errorOnly(rm.arkClient.ArkV1().PodVolumeBackups(volumeBackup.Namespace).Create(volumeBackup)); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+
+	var errs []error
+
+ForLoop:
+	for i := 0; i < len(volumesToBackup); i++ {
+		select {
+		case <-ctx.Done():
+			errs = append(errs, errors.New("timed out waiting for all PodVolumeBackups to complete"))
+			break ForLoop
+		case res := <-resultChan:
+			switch res.Status.Phase {
+			case arkv1api.PodVolumeBackupPhaseCompleted:
+				SetPodSnapshotAnnotation(pod, res.Spec.Volume, res.Status.SnapshotID)
+			case arkv1api.PodVolumeBackupPhaseFailed:
+				errs = append(errs, errors.New("PodVolumeBackup failed"))
+			}
+		}
+	}
+
+	return kerrs.NewAggregate(errs)
+}
+
+func (rm *repositoryManager) RestorePodVolumes(ctx context.Context, restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error {
+	// get volumes to restore from pod's annotations
+	volumesToRestore := GetPodSnapshotAnnotations(pod)
+	if len(volumesToRestore) == 0 {
+		return nil
+	}
+
+	resultChan := make(chan *arkv1api.PodVolumeRestore)
+
+	informer := arkv1informers.NewFilteredPodVolumeRestoreInformer(
+		rm.arkClient,
+		restore.Namespace,
+		0,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+		func(opts *metav1.ListOptions) { opts.LabelSelector = "ark.heptio.com/restore=" + restore.Name },
+	)
+	informer.AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			UpdateFunc: func(_, obj interface{}) {
+				pvr := obj.(*arkv1api.PodVolumeRestore)
+
+				if pvr.Status.Phase == arkv1api.PodVolumeRestorePhaseCompleted || pvr.Status.Phase == arkv1api.PodVolumeRestorePhaseFailed {
+					resultChan <- pvr
+				}
+			},
+		},
+	)
+	go informer.Run(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+		return errors.New("timed out waiting for cache to sync")
+	}
+
+	for volume, snapshot := range volumesToRestore {
+		rm.repoLocker.Lock(pod.Namespace, false)
+		defer rm.repoLocker.Unlock(pod.Namespace, false)
+
+		// TODO should we return here, or continue with what we can?
+		volumeRestore := &arkv1api.PodVolumeRestore{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:    restore.Namespace,
+				GenerateName: restore.Name + "-",
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: arkv1api.SchemeGroupVersion.String(),
+						Kind:       "Restore",
+						Name:       restore.Name,
+						UID:        restore.UID,
+						Controller: boolptr.True(),
+					},
+				},
+				Labels: map[string]string{
+					"ark.heptio.com/restore": restore.Name,
+				},
+			},
+			Spec: arkv1api.PodVolumeRestoreSpec{
+				Pod: corev1api.ObjectReference{
+					Kind:      "Pod",
+					Namespace: pod.Namespace,
+					Name:      pod.Name,
+					UID:       pod.UID,
+				},
+				Volume:     volume,
+				SnapshotID: snapshot,
+				RepoPrefix: rm.repoPrefix,
+			},
+		}
+
+		// TODO should we return here, or continue with what we can?
+		if err := errorOnly(rm.arkClient.ArkV1().PodVolumeRestores(volumeRestore.Namespace).Create(volumeRestore)); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+
+	var errs []error
+
+ForLoop:
+	for i := 0; i < len(volumesToRestore); i++ {
+		select {
+		case <-ctx.Done():
+			errs = append(errs, errors.New("timed out waiting for all PodVolumeRestores to complete"))
+			break ForLoop
+		case res := <-resultChan:
+			if res.Status.Phase == arkv1api.PodVolumeRestorePhaseFailed {
+				errs = append(errs, errors.New("PodVolumeRestore failed"))
+			}
+		}
+	}
+
+	return kerrs.NewAggregate(errs)
+}
+
 func (rm *repositoryManager) RepoPrefix() string {
 	return rm.repoPrefix
 }
@@ -128,8 +349,8 @@ func (rm *repositoryManager) RepositoryExists(name string) (bool, error) {
 }
 
 func (rm *repositoryManager) InitRepo(name string) error {
-	rm.Lock(name)
-	defer rm.Unlock(name)
+	rm.repoLocker.Lock(name, true)
+	defer rm.repoLocker.Unlock(name, true)
 
 	resticCreds, err := rm.secretsClient.Get(credsSecret, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -298,8 +519,8 @@ func (rm *repositoryManager) PruneAllRepos() error {
 }
 
 func (rm *repositoryManager) CheckRepo(name string) error {
-	rm.Lock(name)
-	defer rm.Unlock(name)
+	rm.repoLocker.Lock(name, true)
+	defer rm.repoLocker.Unlock(name, true)
 
 	cmd := &Command{
 		Command:    "check",
@@ -311,8 +532,8 @@ func (rm *repositoryManager) CheckRepo(name string) error {
 }
 
 func (rm *repositoryManager) PruneRepo(name string) error {
-	rm.Lock(name)
-	defer rm.Unlock(name)
+	rm.repoLocker.Lock(name, true)
+	defer rm.repoLocker.Unlock(name, true)
 
 	cmd := &Command{
 		Command:    "prune",
@@ -324,8 +545,8 @@ func (rm *repositoryManager) PruneRepo(name string) error {
 }
 
 func (rm *repositoryManager) Forget(repo, snapshotID string) error {
-	rm.Lock(repo)
-	defer rm.Unlock(repo)
+	rm.repoLocker.Lock(repo, true)
+	defer rm.repoLocker.Unlock(repo, true)
 
 	cmd := &Command{
 		Command:    "forget",

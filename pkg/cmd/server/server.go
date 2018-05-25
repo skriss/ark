@@ -170,22 +170,21 @@ func getSortedLogLevels() []string {
 }
 
 type server struct {
-	namespace               string
-	kubeClientConfig        *rest.Config
-	kubeClient              kubernetes.Interface
-	arkClient               clientset.Interface
-	objectStore             cloudprovider.ObjectStore
-	backupService           cloudprovider.BackupService
-	snapshotService         cloudprovider.SnapshotService
-	discoveryClient         discovery.DiscoveryInterface
-	clientPool              dynamic.ClientPool
-	sharedInformerFactory   informers.SharedInformerFactory
-	ctx                     context.Context
-	cancelFunc              context.CancelFunc
-	logger                  logrus.FieldLogger
-	pluginManager           plugin.Manager
-	resticManager           restic.RepositoryManager
-	resticBackupperRestorer restic.BackupperRestorer
+	namespace             string
+	kubeClientConfig      *rest.Config
+	kubeClient            kubernetes.Interface
+	arkClient             clientset.Interface
+	objectStore           cloudprovider.ObjectStore
+	backupService         cloudprovider.BackupService
+	snapshotService       cloudprovider.SnapshotService
+	discoveryClient       discovery.DiscoveryInterface
+	clientPool            dynamic.ClientPool
+	sharedInformerFactory informers.SharedInformerFactory
+	ctx                   context.Context
+	cancelFunc            context.CancelFunc
+	logger                logrus.FieldLogger
+	pluginManager         plugin.Manager
+	resticManager         restic.RepositoryManager
 }
 
 func newServer(namespace, baseName, pluginDir string, logger *logrus.Logger) (*server, error) {
@@ -503,19 +502,10 @@ func (s *server) initRestic(config api.ObjectStorageProviderConfig) error {
 	s.resticManager = restic.NewRepositoryManager(
 		s.objectStore,
 		config,
+		s.arkClient,
 		s.kubeClient.CoreV1().Secrets(s.namespace),
 		s.logger,
 	)
-
-	backupperRestorer, err := restic.NewBackupperRestorer(
-		s.resticManager,
-		s.arkClient,
-		s.namespace,
-	)
-	if err != nil {
-		return err
-	}
-	s.resticBackupperRestorer = backupperRestorer
 
 	s.logger.Info("Checking restic repositories")
 	return s.resticManager.CheckAllRepos()
@@ -576,7 +566,7 @@ func (s *server) runControllers(config *api.Config) error {
 			s.snapshotService,
 			s.kubeClientConfig,
 			s.kubeClient.CoreV1(),
-			s.resticBackupperRestorer,
+			s.resticManager,
 		)
 		cmd.CheckError(err)
 
@@ -653,7 +643,7 @@ func (s *server) runControllers(config *api.Config) error {
 		config.ResourcePriorities,
 		s.arkClient.ArkV1(),
 		s.kubeClient,
-		s.resticBackupperRestorer,
+		s.resticManager,
 		s.logger,
 	)
 	cmd.CheckError(err)

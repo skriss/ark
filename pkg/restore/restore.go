@@ -19,6 +19,7 @@ package restore
 import (
 	"archive/tar"
 	"compress/gzip"
+	go_context "context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -732,7 +733,12 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 					return
 				}
 
-				if err := ctx.resticRestorer.RestorePodVolumes(ctx.restore, pod, ctx.logger); err != nil {
+				if err := func() error {
+					volumeCtx, cancelFunc := go_context.WithTimeout(go_context.Background(), 10*time.Minute)
+					defer cancelFunc()
+
+					return ctx.resticRestorer.RestorePodVolumes(volumeCtx, ctx.restore, pod, ctx.logger)
+				}(); err != nil {
 					ctx.logger.WithError(err).Error("unable to successfully complete restic restore of pod's volumes")
 				}
 			}()
