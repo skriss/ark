@@ -24,7 +24,6 @@ import (
 	"io/ioutil"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/evanphx/json-patch"
 	"github.com/pkg/errors"
@@ -43,6 +42,7 @@ import (
 	clientset "github.com/heptio/ark/pkg/generated/clientset/versioned"
 	arkv1informers "github.com/heptio/ark/pkg/generated/informers/externalversions/ark/v1"
 	"github.com/heptio/ark/pkg/util/boolptr"
+	"github.com/heptio/ark/pkg/util/sync"
 )
 
 // TODO this is more like a metadata manager
@@ -442,31 +442,16 @@ func (rm *repositoryManager) CheckAllRepos() error {
 		return err
 	}
 
-	var (
-		errors  []error
-		wg      sync.WaitGroup
-		errLock sync.Mutex
-	)
-
+	var eg sync.ErrorGroup
 	for _, repo := range repos {
 		this := repo
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		eg.Go(func() error {
 			rm.log.WithField("repo", this).Debugf("Checking repo %s", this)
-			err := rm.CheckRepo(this)
-
-			errLock.Lock()
-			errors = append(errors, err)
-			errLock.Unlock()
-		}()
+			return rm.CheckRepo(this)
+		})
 	}
 
-	wg.Wait()
-
-	return kerrs.NewAggregate(errors)
+	return kerrs.NewAggregate(eg.Wait())
 }
 
 func (rm *repositoryManager) PruneAllRepos() error {
@@ -475,47 +460,26 @@ func (rm *repositoryManager) PruneAllRepos() error {
 		return err
 	}
 
-	var (
-		errors  []error
-		wg      sync.WaitGroup
-		errLock sync.Mutex
-	)
-
+	var eg sync.ErrorGroup
 	for _, repo := range repos {
 		this := repo
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		eg.Go(func() error {
 			rm.log.WithField("repo", this).Debugf("Pre-prune checking repo %s", this)
 			if err := rm.CheckRepo(this); err != nil {
-				errLock.Lock()
-				errors = append(errors, err)
-				errLock.Unlock()
-
-				return
+				return err
 			}
 
 			rm.log.WithField("repo", this).Debugf("Pruning repo %s", this)
 			if err := rm.PruneRepo(this); err != nil {
-				errLock.Lock()
-				errors = append(errors, err)
-				errLock.Unlock()
+				return err
 			}
 
 			rm.log.WithField("repo", this).Debugf("Post-prune checking repo %s", this)
-			if err := rm.CheckRepo(this); err != nil {
-				errLock.Lock()
-				errors = append(errors, err)
-				errLock.Unlock()
-			}
-		}()
+			return rm.CheckRepo(this)
+		})
 	}
 
-	wg.Wait()
-
-	return kerrs.NewAggregate(errors)
+	return kerrs.NewAggregate(eg.Wait())
 }
 
 func (rm *repositoryManager) CheckRepo(name string) error {
