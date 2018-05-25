@@ -61,7 +61,6 @@ IMAGE := $(REGISTRY)/$(BIN)
 all: 
 	@$(MAKE) build
 	@$(MAKE) build BIN=restic-init-container
-	@$(MAKE) build BIN=restic-wrapper
 
 build-%:
 	@$(MAKE) --no-print-directory ARCH=$* build
@@ -116,7 +115,6 @@ DOTFILE_IMAGE = $(subst :,_,$(subst /,_,$(IMAGE))-$(VERSION))
 all-containers:
 	$(MAKE) container
 	$(MAKE) container BIN=restic-init-container
-	$(MAKE) container BIN=restic-wrapper
 
 container: verify test .container-$(DOTFILE_IMAGE) container-name
 .container-$(DOTFILE_IMAGE): _output/bin/$(GOOS)/$(GOARCH)/$(BIN) $(DOCKERFILE)

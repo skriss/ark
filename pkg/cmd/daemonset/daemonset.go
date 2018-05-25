@@ -16,6 +16,7 @@ import (
 	"github.com/heptio/ark/pkg/controller"
 	clientset "github.com/heptio/ark/pkg/generated/clientset/versioned"
 	informers "github.com/heptio/ark/pkg/generated/informers/externalversions"
+	"github.com/heptio/ark/pkg/util/logging"
 )
 
 func NewCommand(f client.Factory) *cobra.Command {
@@ -38,8 +39,14 @@ func NewCommand(f client.Factory) *cobra.Command {
 
 			ctx := context.Background()
 
-			controller := controller.NewPodVolumeBackupController(
-				logrus.New(),
+			logger := logrus.New()
+			logger.Hooks.Add(&logging.ErrorLocationHook{})
+			logger.Hooks.Add(&logging.LogLocationHook{})
+
+			var wg sync.WaitGroup
+
+			backupController := controller.NewPodVolumeBackupController(
+				logger,
 				arkInformerFactory.Ark().V1().PodVolumeBackups(),
 				arkClient.ArkV1(),
 				k8sInformerFactory.Core().V1().Secrets(),
@@ -48,11 +55,25 @@ func NewCommand(f client.Factory) *cobra.Command {
 				os.Getenv("NODE_NAME"),
 			)
 
-			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				backupController.Run(ctx, 1)
+				wg.Done()
+			}()
+
+			restoreController := controller.NewPodVolumeRestoreController(
+				logger,
+				arkInformerFactory.Ark().V1().PodVolumeRestores(),
+				arkClient.ArkV1(),
+				k8sInformerFactory.Core().V1().Secrets(),
+				k8sInformerFactory.Core().V1().Pods(),
+				k8sInformerFactory.Core().V1().PersistentVolumeClaims(),
+				os.Getenv("NODE_NAME"),
+			)
 
 			wg.Add(1)
 			go func() {
-				controller.Run(ctx, 1)
+				restoreController.Run(ctx, 1)
 				wg.Done()
 			}()
 

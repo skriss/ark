@@ -509,11 +509,6 @@ func (s *server) initRestic(config api.ObjectStorageProviderConfig) error {
 
 	backupperRestorer, err := restic.NewBackupperRestorer(
 		s.resticManager,
-		restic.NewDaemonSetExecutor(
-			podexec.NewPodCommandExecutor(s.kubeClientConfig, s.kubeClient.CoreV1().RESTClient()),
-			s.kubeClient.CoreV1().Pods(s.namespace),
-		),
-		s.kubeClient.CoreV1(),
 		s.arkClient,
 		s.namespace,
 	)

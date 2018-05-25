@@ -34,9 +34,8 @@ import (
 )
 
 const (
-	podAnnotationPrefix         = "snapshot.ark.heptio.com/"
-	volumesToBackupAnnotation   = "backup.ark.heptio.com/backup-volumes"
-	snapshotsInBackupAnnotation = "backup.ark.heptio.com/restic-snapshots"
+	podAnnotationPrefix       = "snapshot.ark.heptio.com/"
+	volumesToBackupAnnotation = "backup.ark.heptio.com/backup-volumes"
 )
 
 // TODO audit functions, make private (?)

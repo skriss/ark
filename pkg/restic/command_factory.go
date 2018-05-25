@@ -24,14 +24,14 @@ func backupTagFlags(tags map[string]string) []string {
 	return flags
 }
 
-func RestoreCommand(repoPrefix, namespace, podUID, snapshotID string) *Command {
+func RestoreCommand(repoPrefix, repo, passwordFile, podUID, snapshotID string) *Command {
 	return &Command{
-		BaseName:   "/restic-wrapper",
-		Command:    "restore",
-		RepoPrefix: repoPrefix,
-		Repo:       namespace,
-		Args:       []string{snapshotID},
-		ExtraFlags: []string{fmt.Sprintf("--target=/restores/%s", podUID)},
+		Command:      "restore",
+		RepoPrefix:   repoPrefix,
+		Repo:         repo,
+		PasswordFile: passwordFile,
+		Args:         []string{snapshotID},
+		ExtraFlags:   []string{fmt.Sprintf("--target=/restores/%s", podUID)},
 	}
 }
 

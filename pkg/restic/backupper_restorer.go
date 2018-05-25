@@ -26,40 +26,35 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	kerrs "k8s.io/apimachinery/pkg/util/errors"
-	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 
 	arkv1api "github.com/heptio/ark/pkg/apis/ark/v1"
 	clientset "github.com/heptio/ark/pkg/generated/clientset/versioned"
 	informers "github.com/heptio/ark/pkg/generated/informers/externalversions/ark/v1"
 	"github.com/heptio/ark/pkg/util/boolptr"
-	"github.com/heptio/ark/pkg/util/kube"
 )
 
 type backupperRestorer struct {
-	metadataManager         RepositoryManager
-	daemonSetExecutor       DaemonSetExecutor
-	pvcGetter               corev1client.PersistentVolumeClaimsGetter
-	client                  clientset.Interface
-	podVolumeBackupInformer cache.SharedIndexInformer
-	backupResults           map[types.UID]chan *arkv1api.PodVolumeBackup
-	namespace               string
+	metadataManager          RepositoryManager
+	client                   clientset.Interface
+	podVolumeBackupInformer  cache.SharedIndexInformer
+	podVolumeRestoreInformer cache.SharedIndexInformer
+	backupResults            map[types.UID]chan *arkv1api.PodVolumeBackup
+	restoreResults           map[types.UID]chan *arkv1api.PodVolumeRestore
+	namespace                string
 }
 
 func NewBackupperRestorer(
 	metadataManager RepositoryManager,
-	daemonSetExecutor DaemonSetExecutor,
-	pvcGetter corev1client.PersistentVolumeClaimsGetter,
 	client clientset.Interface,
 	namespace string,
 ) (BackupperRestorer, error) {
 	br := &backupperRestorer{
-		metadataManager:   metadataManager,
-		daemonSetExecutor: daemonSetExecutor,
-		pvcGetter:         pvcGetter,
-		client:            client,
-		backupResults:     make(map[types.UID]chan *arkv1api.PodVolumeBackup),
-		namespace:         namespace,
+		metadataManager: metadataManager,
+		client:          client,
+		backupResults:   make(map[types.UID]chan *arkv1api.PodVolumeBackup),
+		restoreResults:  make(map[types.UID]chan *arkv1api.PodVolumeRestore),
+		namespace:       namespace,
 	}
 
 	br.podVolumeBackupInformer = informers.NewPodVolumeBackupInformer(client, namespace, 0, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
@@ -88,9 +83,36 @@ func NewBackupperRestorer(
 		},
 	)
 
+	br.podVolumeRestoreInformer = informers.NewPodVolumeRestoreInformer(client, namespace, 0, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	br.podVolumeRestoreInformer.AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			UpdateFunc: func(_, obj interface{}) {
+				pvr := obj.(*arkv1api.PodVolumeRestore)
+
+				if pvr.Status.Phase != arkv1api.PodVolumeRestorePhaseCompleted &&
+					pvr.Status.Phase != arkv1api.PodVolumeRestorePhaseFailed {
+					return
+				}
+
+				var restoreUID types.UID
+				for _, owner := range pvr.OwnerReferences {
+					if boolptr.IsSetToTrue(owner.Controller) {
+						restoreUID = owner.UID
+						break
+					}
+				}
+
+				if c, ok := br.restoreResults[restoreUID]; ok {
+					c <- pvr
+				}
+			},
+		},
+	)
+
 	// TODO do I need to use an actual context here?
 	go br.podVolumeBackupInformer.Run(make(chan struct{}))
-	if !cache.WaitForCacheSync(make(chan struct{}), br.podVolumeBackupInformer.HasSynced) {
+	go br.podVolumeRestoreInformer.Run(make(chan struct{}))
+	if !cache.WaitForCacheSync(make(chan struct{}), br.podVolumeBackupInformer.HasSynced, br.podVolumeRestoreInformer.HasSynced) {
 		return nil, errors.New("timed out waiting for cache to sync")
 	}
 
@@ -218,85 +240,73 @@ func (br *backupperRestorer) RestorePodVolumes(restore *arkv1api.Restore, pod *c
 		return nil
 	}
 
-	var (
-		errs       []error
-		resultChan = make(chan error)
-	)
+	// add a channel for this Ark restore to receive PVR results on
+	br.restoreResults[restore.UID] = make(chan *arkv1api.PodVolumeRestore)
+	defer delete(br.restoreResults, restore.UID)
 
-	// for each volume to restore:
-	for volumeName, snapshotID := range volumesToRestore {
-		go br.restoreVolume(restore, pod, volumeName, snapshotID, resultChan, log)
+	for volume, snapshot := range volumesToRestore {
+		br.metadataManager.RLock(pod.Namespace)
+		defer br.metadataManager.RUnlock(pod.Namespace)
+
+		// TODO should we return here, or continue with what we can?
+		if err := br.createPodVolumeRestore(restore, pod, volume, snapshot, log); err != nil {
+			return err
+		}
 	}
 
+	var (
+		errs []error
+		// TODO configurable
+		timeout = time.After(10 * time.Minute)
+	)
+
+ForLoop:
 	for i := 0; i < len(volumesToRestore); i++ {
-		if err := <-resultChan; err != nil {
-			errs = append(errs, err)
+		select {
+		case <-timeout:
+			errs = append(errs, errors.New("timed out waiting for all PodVolumeRestores to complete"))
+			break ForLoop
+		case res := <-br.restoreResults[restore.UID]:
+			if res.Status.Phase == arkv1api.PodVolumeRestorePhaseFailed {
+				errs = append(errs, errors.New("PodVolumeRestore failed"))
+			}
 		}
 	}
 
 	return kerrs.NewAggregate(errs)
 }
 
-func (br *backupperRestorer) restoreVolume(restore *arkv1api.Restore, pod *corev1api.Pod, volumeName, snapshotID string, resultChan chan<- error, log logrus.FieldLogger) {
-	// confirm it exists in the pod
-	volume := getVolume(pod, volumeName)
-	if volume == nil {
-		resultChan <- errors.Errorf("volume %s does not exist in pod %s", volumeName, kube.NamespaceAndName(pod))
-		return
+func (br *backupperRestorer) createPodVolumeRestore(restore *arkv1api.Restore, pod *corev1api.Pod, volume, snapshot string, log logrus.FieldLogger) error {
+	volumeRestore := &arkv1api.PodVolumeRestore{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:    br.namespace,
+			GenerateName: restore.Name + "-",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: arkv1api.SchemeGroupVersion.String(),
+					Kind:       "Restore",
+					Name:       restore.Name,
+					UID:        restore.UID,
+					Controller: boolptr.True(),
+				},
+			},
+			Labels: map[string]string{
+				"ark.heptio.com/restore": restore.Name,
+			},
+		},
+		Spec: arkv1api.PodVolumeRestoreSpec{
+			Node: pod.Spec.NodeName,
+			Pod: corev1api.ObjectReference{
+				Kind:      "Pod",
+				Namespace: pod.Namespace,
+				Name:      pod.Name,
+				UID:       pod.UID,
+			},
+			Volume:     volume,
+			SnapshotID: snapshot,
+			RepoPrefix: br.metadataManager.RepoPrefix(),
+		},
 	}
 
-	// get the volume's directory name under /var/lib/kubelet/pods/... on the host
-	volumeDir, err := getVolumeDirectory(volume, pod.Namespace, br.pvcGetter)
-	if err != nil {
-		resultChan <- err
-		return
-	}
-
-	// assemble restic restore command
-	restoreCmd := RestoreCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), snapshotID)
-
-	if err := br.exec(pod.Spec.NodeName, pod.Namespace, restoreCmd.StringSlice(), 10*time.Minute, log); err != nil {
-		resultChan <- err
-		return
-	}
-
-	// exec the post-restore command (copy contents into target dir, write done file)
-	completeCmd := []string{"/complete-restore.sh", string(pod.UID), volumeDir, string(restore.UID)}
-	if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, completeCmd, time.Minute, log); err != nil {
-		resultChan <- err
-		return
-	}
-
-	resultChan <- nil
-}
-
-func (br *backupperRestorer) exec(node, namespace string, cmd []string, timeout time.Duration, log logrus.FieldLogger) error {
-	br.metadataManager.RLock(namespace)
-	defer br.metadataManager.RUnlock(namespace)
-
-	return br.daemonSetExecutor.Exec(node, cmd, timeout, log)
-}
-
-// TODO get rid of once restore moves to controller
-func getVolume(pod *corev1api.Pod, volumeName string) *corev1api.Volume {
-	for _, item := range pod.Spec.Volumes {
-		if item.Name == volumeName {
-			return &item
-		}
-	}
-
-	return nil
-}
-
-func getVolumeDirectory(volume *corev1api.Volume, namespace string, pvcGetter corev1client.PersistentVolumeClaimsGetter) (string, error) {
-	if volume.VolumeSource.PersistentVolumeClaim == nil {
-		return volume.Name, nil
-	}
-
-	pvc, err := pvcGetter.PersistentVolumeClaims(namespace).Get(volume.VolumeSource.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
-	if err != nil {
-		return "", errors.WithStack(err)
-	}
-
-	return pvc.Spec.VolumeName, nil
+	return errors.WithStack(errorOnly(br.client.ArkV1().PodVolumeRestores(br.namespace).Create(volumeRestore)))
 }
