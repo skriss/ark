@@ -151,7 +151,9 @@ func (rm *repositoryManager) BackupPodVolumes(ctx context.Context, backup *arkv1
 		backup.Namespace,
 		0,
 		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		func(opts *metav1.ListOptions) { opts.LabelSelector = "ark.heptio.com/backup=" + backup.Name },
+		func(opts *metav1.ListOptions) {
+			opts.LabelSelector = fmt.Sprintf("%s=%s", arkv1api.BackupNameLabel, backup.Name)
+		},
 	)
 	informer.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
@@ -187,7 +189,8 @@ func (rm *repositoryManager) BackupPodVolumes(ctx context.Context, backup *arkv1
 					},
 				},
 				Labels: map[string]string{
-					"ark.heptio.com/backup": backup.Name,
+					arkv1api.BackupNameLabel: backup.Name,
+					arkv1api.BackupUIDLabel:  string(backup.UID),
 				},
 			},
 			Spec: arkv1api.PodVolumeBackupSpec{
@@ -252,7 +255,9 @@ func (rm *repositoryManager) RestorePodVolumes(ctx context.Context, restore *ark
 		restore.Namespace,
 		0,
 		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		func(opts *metav1.ListOptions) { opts.LabelSelector = "ark.heptio.com/restore=" + restore.Name },
+		func(opts *metav1.ListOptions) {
+			opts.LabelSelector = fmt.Sprintf("%s=%s", arkv1api.RestoreNameLabel, restore.Name)
+		},
 	)
 	informer.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
@@ -289,7 +294,8 @@ func (rm *repositoryManager) RestorePodVolumes(ctx context.Context, restore *ark
 					},
 				},
 				Labels: map[string]string{
-					"ark.heptio.com/restore": restore.Name,
+					arkv1api.RestoreNameLabel: restore.Name,
+					arkv1api.RestoreUIDLabel:  string(restore.UID),
 				},
 			},
 			Spec: arkv1api.PodVolumeRestoreSpec{

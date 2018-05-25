@@ -103,7 +103,7 @@ func GetVolumesToBackup(obj metav1.Object) []string {
 }
 
 func GetSnapshotsInBackup(backup *arkv1api.Backup, podVolumeBackupLister arkv1listers.PodVolumeBackupLister) ([]string, error) {
-	selector, err := labels.Parse("ark.heptio.com/backup=" + backup.Name)
+	selector, err := labels.Parse(fmt.Sprintf("%s=%s", arkv1api.BackupNameLabel, backup.Name))
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
