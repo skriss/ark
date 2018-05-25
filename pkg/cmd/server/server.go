@@ -507,14 +507,20 @@ func (s *server) initRestic(config api.ObjectStorageProviderConfig) error {
 		s.logger,
 	)
 
-	s.resticBackupperRestorer = restic.NewBackupperRestorer(
+	backupperRestorer, err := restic.NewBackupperRestorer(
 		s.resticManager,
 		restic.NewDaemonSetExecutor(
 			podexec.NewPodCommandExecutor(s.kubeClientConfig, s.kubeClient.CoreV1().RESTClient()),
 			s.kubeClient.CoreV1().Pods(s.namespace),
 		),
 		s.kubeClient.CoreV1(),
+		s.arkClient,
+		s.namespace,
 	)
+	if err != nil {
+		return err
+	}
+	s.resticBackupperRestorer = backupperRestorer
 
 	s.logger.Info("Checking restic repositories")
 	return s.resticManager.CheckAllRepos()
@@ -634,6 +640,7 @@ func (s *server) runControllers(config *api.Config) error {
 			s.arkClient.ArkV1(), // restoreClient
 			backupTracker,
 			s.resticManager,
+			s.sharedInformerFactory.Ark().V1().PodVolumeBackups(),
 		)
 		wg.Add(1)
 		go func() {

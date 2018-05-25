@@ -1,0 +1,271 @@
+/*
+Copyright 2018 the Heptio Ark contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	jsonpatch "github.com/evanphx/json-patch"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	corev1informers "k8s.io/client-go/informers/core/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
+
+	arkv1api "github.com/heptio/ark/pkg/apis/ark/v1"
+	arkv1client "github.com/heptio/ark/pkg/generated/clientset/versioned/typed/ark/v1"
+	informers "github.com/heptio/ark/pkg/generated/informers/externalversions/ark/v1"
+	listers "github.com/heptio/ark/pkg/generated/listers/ark/v1"
+	"github.com/heptio/ark/pkg/restic"
+	"github.com/heptio/ark/pkg/util/kube"
+)
+
+type podVolumeBackupController struct {
+	*genericController
+
+	podVolumeBackupClient arkv1client.PodVolumeBackupsGetter
+	podVolumeBackupLister listers.PodVolumeBackupLister
+	secretLister          corev1listers.SecretLister
+	podLister             corev1listers.PodLister
+	pvcLister             corev1listers.PersistentVolumeClaimLister
+	nodeName              string
+
+	processBackupFunc func(*arkv1api.PodVolumeBackup) error
+}
+
+// NewPodVolumeBackupController creates a new pod volume backup controller.
+func NewPodVolumeBackupController(
+	logger logrus.FieldLogger,
+	podVolumeBackupInformer informers.PodVolumeBackupInformer,
+	podVolumeBackupClient arkv1client.PodVolumeBackupsGetter,
+	secretInformer corev1informers.SecretInformer,
+	podInformer corev1informers.PodInformer,
+	pvcInformer corev1informers.PersistentVolumeClaimInformer,
+	nodeName string,
+) Interface {
+	c := &podVolumeBackupController{
+		genericController:     newGenericController("pod-volume-backup", logger),
+		podVolumeBackupClient: podVolumeBackupClient,
+		podVolumeBackupLister: podVolumeBackupInformer.Lister(),
+		secretLister:          secretInformer.Lister(),
+		podLister:             podInformer.Lister(),
+		pvcLister:             pvcInformer.Lister(),
+		nodeName:              nodeName,
+	}
+
+	c.syncHandler = c.processQueueItem
+	c.cacheSyncWaiters = append(
+		c.cacheSyncWaiters,
+		podVolumeBackupInformer.Informer().HasSynced,
+		secretInformer.Informer().HasSynced,
+		podInformer.Informer().HasSynced,
+		pvcInformer.Informer().HasSynced,
+	)
+	c.processBackupFunc = c.processBackup
+
+	podVolumeBackupInformer.Informer().AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			AddFunc:    c.enqueue,
+			UpdateFunc: func(_, obj interface{}) { c.enqueue(obj) },
+		},
+	)
+
+	c.resyncPeriod = time.Hour
+	// c.resyncFunc = c.deleteExpiredRequests
+
+	return c
+}
+
+func (c *podVolumeBackupController) processQueueItem(key string) error {
+	log := c.logger.WithField("key", key)
+	log.Debug("Running processItem")
+
+	ns, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		return errors.Wrap(err, "error splitting queue key")
+	}
+
+	req, err := c.podVolumeBackupLister.PodVolumeBackups(ns).Get(name)
+	if apierrors.IsNotFound(err) {
+		log.Debug("Unable to find PodVolumeBackup")
+		return nil
+	}
+	if err != nil {
+		return errors.Wrap(err, "error getting PodVolumeBackup")
+	}
+
+	// only process new items
+	switch req.Status.Phase {
+	case "", arkv1api.PodVolumeBackupPhaseNew:
+	default:
+		return nil
+	}
+
+	// only process items for this node
+	if req.Spec.Node != c.nodeName {
+		return nil
+	}
+
+	// Don't mutate the shared cache
+	reqCopy := req.DeepCopy()
+	return c.processBackupFunc(reqCopy)
+}
+
+func (c *podVolumeBackupController) processBackup(req *arkv1api.PodVolumeBackup) error {
+	log := c.logger.WithFields(logrus.Fields{
+		"namespace": req.Namespace,
+		"name":      req.Name,
+	})
+
+	var err error
+
+	// update status to InProgress
+	req, err = c.patchPodVolumeBackup(req, updatePhaseFunc(arkv1api.PodVolumeBackupPhaseInProgress))
+	if err != nil {
+		log.WithError(err).Error("Error setting phase to InProgress")
+		return errors.WithStack(err)
+	}
+
+	pod, err := c.podLister.Pods(req.Spec.Pod.Namespace).Get(req.Spec.Pod.Name)
+	if err != nil {
+		log.WithError(err).Errorf("Error getting pod %s/%s", req.Spec.Pod.Namespace, req.Spec.Pod.Name)
+		return c.fail(req, log)
+	}
+
+	volumeDir, err := kube.GetVolumeDirectory(pod, req.Spec.Volume, c.pvcLister)
+	if err != nil {
+		log.WithError(err).Error("Error getting volume directory name")
+		return c.fail(req, log)
+	}
+
+	path, err := singlePathMatch(fmt.Sprintf("/host_pods/%s/volumes/*/%s", string(req.Spec.Pod.UID), volumeDir))
+	if err != nil {
+		log.WithError(err).Error("Error uniquely identifying volume path")
+		return err
+	}
+
+	// TODO creds should move into the pod's namespace
+
+	// temp creds
+	file, err := restic.TempCredentialsFile(c.secretLister, "restic-credentials", req.Namespace, req.Spec.Pod.Namespace)
+	if err != nil {
+		log.WithError(err).Error("Error creating temp restic credentials file")
+		return c.fail(req, log)
+	}
+
+	defer file.Close()
+	defer os.Remove(file.Name())
+
+	resticCmd := restic.BackupCommand(
+		req.Spec.RepoPrefix,
+		req.Spec.Pod.Namespace,
+		file.Name(),
+		path,
+		req.Spec.Tags,
+	)
+
+	res, err := resticCmd.Cmd().CombinedOutput()
+	log.Infof("Ran restic command=%s, output=%s", resticCmd.String(), res)
+
+	if err != nil {
+		// TODO include error on CR
+		// update status to Failed
+		return c.fail(req, log)
+	}
+
+	snapshotID, err := restic.GetSnapshotID(req.Spec.RepoPrefix, req.Spec.Pod.Namespace, file.Name(), req.Spec.Tags)
+	if err != nil {
+		log.WithError(err).Error("Error getting SnapshotID")
+		return c.fail(req, log)
+	}
+
+	// update status to Completed with path & snapshot id
+	req, err = c.patchPodVolumeBackup(req, func(r *arkv1api.PodVolumeBackup) {
+		r.Status.Path = path
+		r.Status.SnapshotID = snapshotID
+		r.Status.Phase = arkv1api.PodVolumeBackupPhaseCompleted
+	})
+	if err != nil {
+		log.WithError(err).Error("Error setting phase to Completed")
+		return err
+	}
+
+	return nil
+}
+
+func (c *podVolumeBackupController) patchPodVolumeBackup(req *arkv1api.PodVolumeBackup, mutate func(*arkv1api.PodVolumeBackup)) (*arkv1api.PodVolumeBackup, error) {
+	// Record original json
+	oldData, err := json.Marshal(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "error marshalling original PodVolumeBackup")
+	}
+
+	// Mutate
+	mutate(req)
+
+	// Record new json
+	newData, err := json.Marshal(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "error marshalling updated PodVolumeBackup")
+	}
+
+	patchBytes, err := jsonpatch.CreateMergePatch(oldData, newData)
+	if err != nil {
+		return nil, errors.Wrap(err, "error creating json merge patch for PodVolumeBackup")
+	}
+
+	req, err = c.podVolumeBackupClient.PodVolumeBackups(req.Namespace).Patch(req.Name, types.MergePatchType, patchBytes)
+	if err != nil {
+		return nil, errors.Wrap(err, "error patching PodVolumeBackup")
+	}
+
+	return req, nil
+}
+
+func (c *podVolumeBackupController) fail(req *arkv1api.PodVolumeBackup, log logrus.FieldLogger) error {
+	if _, err := c.patchPodVolumeBackup(req, updatePhaseFunc(arkv1api.PodVolumeBackupPhaseFailed)); err != nil {
+		log.WithError(err).Error("Error setting phase to Failed")
+		return err
+	}
+	return nil
+}
+
+func updatePhaseFunc(phase arkv1api.PodVolumeBackupPhase) func(r *arkv1api.PodVolumeBackup) {
+	return func(r *arkv1api.PodVolumeBackup) {
+		r.Status.Phase = phase
+	}
+}
+
+func singlePathMatch(path string) (string, error) {
+	matches, err := filepath.Glob(path)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	if len(matches) != 1 {
+		return "", errors.New("cannot uniquely identify volume path")
+	}
+
+	return matches[0], nil
+}

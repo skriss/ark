@@ -18,13 +18,19 @@ package restic
 
 import (
 	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
 	"strings"
 
 	"github.com/pkg/errors"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 
-	arkv1client "github.com/heptio/ark/pkg/apis/ark/v1"
+	arkv1api "github.com/heptio/ark/pkg/apis/ark/v1"
+	arkv1listers "github.com/heptio/ark/pkg/generated/listers/ark/v1"
 )
 
 const (
@@ -97,35 +103,47 @@ func GetVolumesToBackup(obj metav1.Object) []string {
 	return backups
 }
 
-func GetSnapshotsInBackup(backup *arkv1client.Backup) ([]string, error) {
-	if backup.Annotations == nil {
-		return nil, nil
-	}
-
-	snapshotsValue := backup.Annotations[snapshotsInBackupAnnotation]
-	if snapshotsValue == "" {
-		return nil, nil
-	}
-
-	var snapshots []string
-	if err := json.Unmarshal([]byte(snapshotsValue), &snapshots); err != nil {
+func GetSnapshotsInBackup(backup *arkv1api.Backup, podVolumeBackupLister arkv1listers.PodVolumeBackupLister) ([]string, error) {
+	selector, err := labels.Parse("ark.heptio.com/backup=" + backup.Name)
+	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 
-	return snapshots, nil
+	podVolumeBackups, err := podVolumeBackupLister.List(selector)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	var res []string
+	for _, item := range podVolumeBackups {
+		if item.Status.SnapshotID == "" {
+			continue
+		}
+		res = append(res, fmt.Sprintf("%s/%s", item.Spec.Pod.Namespace, item.Status.SnapshotID))
+	}
+
+	return res, nil
 }
 
-func SetSnapshotsInBackup(backup *arkv1client.Backup, snapshots []string) error {
-	jsonBytes, err := json.Marshal(snapshots)
+func TempCredentialsFile(secretLister corev1listers.SecretLister, secretName, secretNamespace, repoName string) (*os.File, error) {
+	secret, err := secretLister.Secrets(secretNamespace).Get(secretName)
 	if err != nil {
-		return errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 
-	if backup.Annotations == nil {
-		backup.Annotations = make(map[string]string)
+	repoKey, found := secret.Data[repoName]
+	if !found {
+		return nil, errors.Errorf("key %s not found in restic-credentials secret", repoName)
 	}
 
-	backup.Annotations[snapshotsInBackupAnnotation] = string(jsonBytes)
+	file, err := ioutil.TempFile("", fmt.Sprintf("restic-credentials-%s", repoName))
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
 
-	return nil
+	if _, err := file.Write(repoKey); err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	return file, nil
 }

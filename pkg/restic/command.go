@@ -22,32 +22,39 @@ import (
 	"strings"
 )
 
-type command struct {
-	baseName     string
-	command      string
-	repoPrefix   string
-	repo         string
-	passwordFile string
-	args         []string
-	extraFlags   []string
+type Command struct {
+	BaseName     string
+	Command      string
+	RepoPrefix   string
+	Repo         string
+	PasswordFile string
+	Args         []string
+	ExtraFlags   []string
 }
 
-func (c *command) StringSlice() []string {
-	res := []string{c.baseName, c.command, repoFlag(c.repoPrefix, c.repo)}
-	if c.passwordFile != "" {
-		res = append(res, passwordFlag(c.passwordFile))
+func (c *Command) StringSlice() []string {
+	var res []string
+	if c.BaseName != "" {
+		res = append(res, c.BaseName)
+	} else {
+		res = append(res, "/restic")
 	}
-	res = append(res, c.args...)
-	res = append(res, c.extraFlags...)
+
+	res = append(res, c.Command, repoFlag(c.RepoPrefix, c.Repo))
+	if c.PasswordFile != "" {
+		res = append(res, passwordFlag(c.PasswordFile))
+	}
+	res = append(res, c.Args...)
+	res = append(res, c.ExtraFlags...)
 
 	return res
 }
 
-func (c *command) String() string {
+func (c *Command) String() string {
 	return strings.Join(c.StringSlice(), " ")
 }
 
-func (c *command) Command() *exec.Cmd {
+func (c *Command) Cmd() *exec.Cmd {
 	parts := c.StringSlice()
 	return exec.Command(parts[0], parts[1:]...)
 }
@@ -58,16 +65,4 @@ func repoFlag(prefix, repo string) string {
 
 func passwordFlag(file string) string {
 	return fmt.Sprintf("--password-file=%s", file)
-}
-
-func backupTagFlags(vals map[string]string) []string {
-	var flags []string
-	for k, v := range vals {
-		flags = append(flags, fmt.Sprintf("--tag=%s=%s", k, v))
-	}
-	return flags
-}
-
-func restoreTargetFlag(podUID string) string {
-	return fmt.Sprintf("--target=/restores/%s", podUID)
 }

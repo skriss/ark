@@ -53,6 +53,7 @@ type backupDeletionController struct {
 	restoreClient             arkv1client.RestoresGetter
 	backupTracker             BackupTracker
 	resticMgr                 restic.RepositoryManager
+	podvolumeBackupLister     listers.PodVolumeBackupLister
 
 	processRequestFunc func(*v1.DeleteBackupRequest) error
 	clock              clock.Clock
@@ -71,6 +72,7 @@ func NewBackupDeletionController(
 	restoreClient arkv1client.RestoresGetter,
 	backupTracker BackupTracker,
 	resticMgr restic.RepositoryManager,
+	podvolumeBackupInformer informers.PodVolumeBackupInformer,
 ) Interface {
 	c := &backupDeletionController{
 		genericController:         newGenericController("backup-deletion", logger),
@@ -84,11 +86,17 @@ func NewBackupDeletionController(
 		restoreClient:             restoreClient,
 		backupTracker:             backupTracker,
 		resticMgr:                 resticMgr,
-		clock:                     &clock.RealClock{},
+		podvolumeBackupLister:     podvolumeBackupInformer.Lister(),
+		clock: &clock.RealClock{},
 	}
 
 	c.syncHandler = c.processQueueItem
-	c.cacheSyncWaiters = append(c.cacheSyncWaiters, deleteBackupRequestInformer.Informer().HasSynced, restoreInformer.Informer().HasSynced)
+	c.cacheSyncWaiters = append(
+		c.cacheSyncWaiters,
+		deleteBackupRequestInformer.Informer().HasSynced,
+		restoreInformer.Informer().HasSynced,
+		podvolumeBackupInformer.Informer().HasSynced,
+	)
 	c.processRequestFunc = c.processRequest
 
 	deleteBackupRequestInformer.Informer().AddEventHandler(
@@ -232,7 +240,7 @@ func (c *backupDeletionController) processRequest(req *v1.DeleteBackupRequest) e
 
 	// Try to delete restic snapshots
 	log.Info("Removing restic snapshots")
-	if snapshots, err := restic.GetSnapshotsInBackup(backup); err != nil {
+	if snapshots, err := restic.GetSnapshotsInBackup(backup, c.podvolumeBackupLister); err != nil {
 		errs = append(errs, err.Error())
 	} else {
 		for _, snapshot := range snapshots {

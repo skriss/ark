@@ -49,8 +49,6 @@ type RepositoryManager interface {
 	CheckAllRepos() error
 	PruneRepo(name string) error
 	PruneAllRepos() error
-
-	GetSnapshotID(repo, backupUID, podUID, volume string) (string, error)
 	Forget(repo, snapshotID string) error
 
 	Lock(repo string)
@@ -189,11 +187,10 @@ func (rm *repositoryManager) InitRepo(name string) error {
 	}
 
 	// init the repo
-	cmd := &command{
-		baseName:   "/restic",
-		command:    "init",
-		repoPrefix: rm.repoPrefix,
-		repo:       name,
+	cmd := &Command{
+		Command:    "init",
+		RepoPrefix: rm.repoPrefix,
+		Repo:       name,
 	}
 
 	return errorOnly(rm.exec(cmd))
@@ -304,11 +301,10 @@ func (rm *repositoryManager) CheckRepo(name string) error {
 	rm.Lock(name)
 	defer rm.Unlock(name)
 
-	cmd := &command{
-		baseName:   "/restic",
-		command:    "check",
-		repoPrefix: rm.repoPrefix,
-		repo:       name,
+	cmd := &Command{
+		Command:    "check",
+		RepoPrefix: rm.repoPrefix,
+		Repo:       name,
 	}
 
 	return errorOnly(rm.exec(cmd))
@@ -318,84 +314,45 @@ func (rm *repositoryManager) PruneRepo(name string) error {
 	rm.Lock(name)
 	defer rm.Unlock(name)
 
-	cmd := &command{
-		baseName:   "/restic",
-		command:    "prune",
-		repoPrefix: rm.repoPrefix,
-		repo:       name,
+	cmd := &Command{
+		Command:    "prune",
+		RepoPrefix: rm.repoPrefix,
+		Repo:       name,
 	}
 
 	return errorOnly(rm.exec(cmd))
-}
-
-func (rm *repositoryManager) GetSnapshotID(repo, backupUID, podUID, volume string) (string, error) {
-	rm.RLock(repo)
-	defer rm.RUnlock(repo)
-
-	tagFilters := []string{
-		"ns=" + repo,
-		"pod-uid=" + podUID,
-		"volume=" + volume,
-		"backup-uid=" + backupUID,
-	}
-
-	cmd := &command{
-		baseName:   "/restic",
-		command:    "snapshots",
-		repoPrefix: rm.repoPrefix,
-		repo:       repo,
-		extraFlags: []string{"--json", "--last", fmt.Sprintf("--tag=%s", strings.Join(tagFilters, ","))},
-	}
-
-	res, err := rm.exec(cmd)
-	if err != nil {
-		return "", errors.Wrap(err, "unable to run restic snapshots command")
-	}
-
-	type jsonArray []map[string]interface{}
-
-	var snapshots jsonArray
-
-	if err := json.Unmarshal(res, &snapshots); err != nil {
-		return "", errors.Wrap(err, "error unmarshalling restic snapshots result")
-	}
-
-	if len(snapshots) != 1 {
-		return "", errors.Errorf("expected one matching snapshot, got %d", len(snapshots))
-	}
-
-	return snapshots[0]["short_id"].(string), nil
 }
 
 func (rm *repositoryManager) Forget(repo, snapshotID string) error {
 	rm.Lock(repo)
 	defer rm.Unlock(repo)
 
-	cmd := &command{
-		baseName:   "/restic",
-		command:    "forget",
-		repoPrefix: rm.repoPrefix,
-		repo:       repo,
-		args:       []string{snapshotID},
+	cmd := &Command{
+		Command:    "forget",
+		RepoPrefix: rm.repoPrefix,
+		Repo:       repo,
+		Args:       []string{snapshotID},
 	}
 
 	return errorOnly(rm.exec(cmd))
 }
 
-func (rm *repositoryManager) exec(cmd *command) ([]byte, error) {
+func (rm *repositoryManager) exec(cmd *Command) ([]byte, error) {
+	// TODO use a SecretLister instead of a client and switch to using restic.TempCredentialsFile func
+
 	// get the encryption key for this repo from the secret
 	secret, err := rm.secretsClient.Get(credsSecret, metav1.GetOptions{})
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 
-	repoKey, found := secret.Data[cmd.repo]
+	repoKey, found := secret.Data[cmd.Repo]
 	if !found {
-		return nil, errors.Errorf("key %s not found in restic-credentials secret", cmd.repo)
+		return nil, errors.Errorf("key %s not found in restic-credentials secret", cmd.Repo)
 	}
 
 	// write it to a temp file
-	file, err := ioutil.TempFile("", fmt.Sprintf("restic-credentials-%s", cmd.repo))
+	file, err := ioutil.TempFile("", fmt.Sprintf("restic-credentials-%s", cmd.Repo))
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -410,10 +367,10 @@ func (rm *repositoryManager) exec(cmd *command) ([]byte, error) {
 	}
 
 	// use the temp creds file for running the command
-	cmd.passwordFile = file.Name()
+	cmd.PasswordFile = file.Name()
 
-	res, err := cmd.Command().Output()
-	rm.log.WithField("repository", cmd.repo).Debugf("Ran restic command=%q, output=%s", cmd.String(), res)
+	res, err := cmd.Cmd().Output()
+	rm.log.WithField("repository", cmd.Repo).Debugf("Ran restic command=%q, output=%s", cmd.String(), res)
 
 	return res, errors.WithStack(err)
 }

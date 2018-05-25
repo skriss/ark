@@ -17,7 +17,6 @@ limitations under the License.
 package restic
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/pkg/errors"
@@ -25,29 +24,77 @@ import (
 
 	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	kerrs "k8s.io/apimachinery/pkg/util/errors"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/tools/cache"
 
 	arkv1api "github.com/heptio/ark/pkg/apis/ark/v1"
+	clientset "github.com/heptio/ark/pkg/generated/clientset/versioned"
+	informers "github.com/heptio/ark/pkg/generated/informers/externalversions/ark/v1"
+	"github.com/heptio/ark/pkg/util/boolptr"
 	"github.com/heptio/ark/pkg/util/kube"
 )
 
 type backupperRestorer struct {
-	metadataManager   RepositoryManager
-	daemonSetExecutor DaemonSetExecutor
-	pvcGetter         corev1client.PersistentVolumeClaimsGetter
+	metadataManager         RepositoryManager
+	daemonSetExecutor       DaemonSetExecutor
+	pvcGetter               corev1client.PersistentVolumeClaimsGetter
+	client                  clientset.Interface
+	podVolumeBackupInformer cache.SharedIndexInformer
+	backupResults           map[types.UID]chan *arkv1api.PodVolumeBackup
+	namespace               string
 }
 
 func NewBackupperRestorer(
 	metadataManager RepositoryManager,
 	daemonSetExecutor DaemonSetExecutor,
 	pvcGetter corev1client.PersistentVolumeClaimsGetter,
-) BackupperRestorer {
-	return &backupperRestorer{
+	client clientset.Interface,
+	namespace string,
+) (BackupperRestorer, error) {
+	br := &backupperRestorer{
 		metadataManager:   metadataManager,
 		daemonSetExecutor: daemonSetExecutor,
 		pvcGetter:         pvcGetter,
+		client:            client,
+		backupResults:     make(map[types.UID]chan *arkv1api.PodVolumeBackup),
+		namespace:         namespace,
 	}
+
+	br.podVolumeBackupInformer = informers.NewPodVolumeBackupInformer(client, namespace, 0, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	br.podVolumeBackupInformer.AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			UpdateFunc: func(_, obj interface{}) {
+				pvb := obj.(*arkv1api.PodVolumeBackup)
+
+				if pvb.Status.Phase != arkv1api.PodVolumeBackupPhaseCompleted &&
+					pvb.Status.Phase != arkv1api.PodVolumeBackupPhaseFailed {
+					return
+				}
+
+				var backupUID types.UID
+				for _, owner := range pvb.OwnerReferences {
+					if boolptr.IsSetToTrue(owner.Controller) {
+						backupUID = owner.UID
+						break
+					}
+				}
+
+				if c, ok := br.backupResults[backupUID]; ok {
+					c <- pvb
+				}
+			},
+		},
+	)
+
+	// TODO do I need to use an actual context here?
+	go br.podVolumeBackupInformer.Run(make(chan struct{}))
+	if !cache.WaitForCacheSync(make(chan struct{}), br.podVolumeBackupInformer.HasSynced) {
+		return nil, errors.New("timed out waiting for cache to sync")
+	}
+
+	return br, nil
 }
 
 type BackupperRestorer interface {
@@ -72,14 +119,6 @@ func (br *backupperRestorer) BackupPodVolumes(backup *arkv1api.Backup, pod *core
 		return nil
 	}
 
-	// Get existing snapshots annotated on backup, and fail-fast if
-	// we can't. We'll append new snapshots to this at the end of
-	// this func.
-	backupSnapshots, err := GetSnapshotsInBackup(backup)
-	if err != nil {
-		return err
-	}
-
 	// ensure a repo exists for the pod's namespace
 	exists, err := br.metadataManager.RepositoryExists(pod.Namespace)
 	if err != nil {
@@ -91,89 +130,85 @@ func (br *backupperRestorer) BackupPodVolumes(backup *arkv1api.Backup, pod *core
 		}
 	}
 
-	var (
-		errs       []error
-		resultChan = make(chan backupResult)
-	)
+	// add a channel for this Ark backup to receive PVB results on
+	br.backupResults[backup.UID] = make(chan *arkv1api.PodVolumeBackup)
+	defer delete(br.backupResults, backup.UID)
 
 	for _, volumeName := range volumesToBackup {
-		go br.backupVolume(backup, pod, volumeName, resultChan, log)
-	}
+		br.metadataManager.RLock(pod.Namespace)
+		defer br.metadataManager.RUnlock(pod.Namespace)
 
-	for i := 0; i < len(volumesToBackup); i++ {
-		res := <-resultChan
-		switch {
-		case res.err != nil:
-			errs = append(errs, res.err)
-		default:
-			SetPodSnapshotAnnotation(pod, res.volumeName, res.snapshotID)
-			backupSnapshots = append(backupSnapshots, res.snapshotID)
+		// TODO should we return here, or continue with what we can?
+		if err := br.createPodVolumeBackup(backup, pod, volumeName, log); err != nil {
+			return err
 		}
 	}
 
-	// only write the backup annotation if we have at least one snapshot
-	if len(backupSnapshots) > 0 {
-		// update backup's annotations with all snapshot IDs
-		if err := SetSnapshotsInBackup(backup, backupSnapshots); err != nil {
-			errs = append(errs, err)
+	var (
+		errs []error
+		// TODO configurable
+		timeout = time.After(10 * time.Minute)
+	)
+
+ForLoop:
+	for i := 0; i < len(volumesToBackup); i++ {
+		select {
+		case <-timeout:
+			errs = append(errs, errors.New("timed out waiting for all PodVolumeBackups to complete"))
+			break ForLoop
+		case res := <-br.backupResults[backup.UID]:
+			switch {
+			case res.Status.Phase == arkv1api.PodVolumeBackupPhaseFailed:
+				errs = append(errs, errors.New("PodVolumeBackup failed"))
+			default:
+				SetPodSnapshotAnnotation(pod, res.Spec.Volume, res.Status.SnapshotID)
+			}
 		}
 	}
 
 	return kerrs.NewAggregate(errs)
 }
 
-type backupResult struct {
-	volumeName string
-	snapshotID string
-	err        error
-}
-
-func (br *backupperRestorer) backupVolume(backup *arkv1api.Backup, pod *corev1api.Pod, volumeName string, resultChan chan<- backupResult, log logrus.FieldLogger) {
-	volume := getVolume(pod, volumeName)
-	if volume == nil {
-		resultChan <- backupResult{err: errors.Errorf("volume %s does not exist in pod %s", volumeName, kube.NamespaceAndName(pod))}
-		return
+func (br *backupperRestorer) createPodVolumeBackup(backup *arkv1api.Backup, pod *corev1api.Pod, volumeName string, log logrus.FieldLogger) error {
+	volumeBackup := &arkv1api.PodVolumeBackup{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:    br.namespace,
+			GenerateName: backup.Name + "-",
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: arkv1api.SchemeGroupVersion.String(),
+					Kind:       "Backup",
+					Name:       backup.Name,
+					UID:        backup.UID,
+					Controller: boolptr.True(),
+				},
+			},
+			Labels: map[string]string{
+				"ark.heptio.com/backup": backup.Name,
+			},
+		},
+		Spec: arkv1api.PodVolumeBackupSpec{
+			Node: pod.Spec.NodeName,
+			Pod: corev1api.ObjectReference{
+				Kind:      "Pod",
+				Namespace: pod.Namespace,
+				Name:      pod.Name,
+				UID:       pod.UID,
+			},
+			Volume: volumeName,
+			Tags: map[string]string{
+				"backup":     backup.Name,
+				"backup-uid": string(backup.UID),
+				"pod":        pod.Name,
+				"pod-uid":    string(pod.UID),
+				"ns":         pod.Namespace,
+				"volume":     volumeName,
+			},
+			RepoPrefix: br.metadataManager.RepoPrefix(),
+		},
 	}
 
-	// get the volume's directory name under /var/lib/kubelet/pods/... on the host
-	volumeDir, err := getVolumeDirectory(volume, pod.Namespace, br.pvcGetter)
-	if err != nil {
-		resultChan <- backupResult{err: err}
-		return
-	}
-
-	// assemble restic backup command
-	snapshotTags := map[string]string{
-		"backup":     backup.Name,
-		"backup-uid": string(backup.UID),
-		"pod":        pod.Name,
-		"pod-uid":    string(pod.UID),
-		"ns":         pod.Namespace,
-		"volume":     volumeName,
-	}
-
-	cmd := backupCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), volumeDir, snapshotTags)
-
-	if err := br.exec(pod.Spec.NodeName, pod.Namespace, cmd, 10*time.Minute, log); err != nil {
-		resultChan <- backupResult{err: err}
-		return
-	}
-
-	// get the snapshot's ID
-	snapshotID, err := br.metadataManager.GetSnapshotID(pod.Namespace, string(backup.UID), string(pod.UID), volumeName)
-	if err != nil {
-		resultChan <- backupResult{err: err}
-		return
-	}
-
-	resultChan <- backupResult{volumeName: volumeName, snapshotID: fmt.Sprintf("%s/%s", pod.Namespace, snapshotID)}
-}
-
-func (br *backupperRestorer) exec(node, namespace string, cmd []string, timeout time.Duration, log logrus.FieldLogger) error {
-	br.metadataManager.RLock(namespace)
-	defer br.metadataManager.RUnlock(namespace)
-
-	return br.daemonSetExecutor.Exec(node, cmd, timeout, log)
+	return errors.WithStack(errorOnly(br.client.ArkV1().PodVolumeBackups(br.namespace).Create(volumeBackup)))
 }
 
 func (br *backupperRestorer) RestorePodVolumes(restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error {
@@ -218,16 +253,16 @@ func (br *backupperRestorer) restoreVolume(restore *arkv1api.Restore, pod *corev
 	}
 
 	// assemble restic restore command
-	cmd := restoreCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), snapshotID)
+	restoreCmd := RestoreCommand(br.metadataManager.RepoPrefix(), pod.Namespace, string(pod.UID), snapshotID)
 
-	if err := br.exec(pod.Spec.NodeName, pod.Namespace, cmd, 10*time.Minute, log); err != nil {
+	if err := br.exec(pod.Spec.NodeName, pod.Namespace, restoreCmd.StringSlice(), 10*time.Minute, log); err != nil {
 		resultChan <- err
 		return
 	}
 
 	// exec the post-restore command (copy contents into target dir, write done file)
-	cmd = []string{"/complete-restore.sh", string(pod.UID), volumeDir, string(restore.UID)}
-	if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, cmd, time.Minute, log); err != nil {
+	completeCmd := []string{"/complete-restore.sh", string(pod.UID), volumeDir, string(restore.UID)}
+	if err := br.daemonSetExecutor.Exec(pod.Spec.NodeName, completeCmd, time.Minute, log); err != nil {
 		resultChan <- err
 		return
 	}
@@ -235,6 +270,14 @@ func (br *backupperRestorer) restoreVolume(restore *arkv1api.Restore, pod *corev
 	resultChan <- nil
 }
 
+func (br *backupperRestorer) exec(node, namespace string, cmd []string, timeout time.Duration, log logrus.FieldLogger) error {
+	br.metadataManager.RLock(namespace)
+	defer br.metadataManager.RUnlock(namespace)
+
+	return br.daemonSetExecutor.Exec(node, cmd, timeout, log)
+}
+
+// TODO get rid of once restore moves to controller
 func getVolume(pod *corev1api.Pod, volumeName string) *corev1api.Volume {
 	for _, item := range pod.Spec.Volumes {
 		if item.Name == volumeName {
@@ -256,32 +299,4 @@ func getVolumeDirectory(volume *corev1api.Volume, namespace string, pvcGetter co
 	}
 
 	return pvc.Spec.VolumeName, nil
-}
-
-func backupCommand(repoPrefix, namespace, podUID, volumeDir string, tags map[string]string) []string {
-	cmd := &command{
-		baseName:   "/restic-wrapper",
-		command:    "backup",
-		repoPrefix: repoPrefix,
-		repo:       namespace,
-		args:       []string{fmt.Sprintf("/host_pods/%s/volumes/*/%s", podUID, volumeDir)},
-		extraFlags: backupTagFlags(tags),
-	}
-
-	// needs to be executed within a shell because we're using a path wildcard
-	// that needs to be expanded
-	return []string{"/bin/sh", "-c", cmd.String()}
-}
-
-func restoreCommand(repoPrefix, namespace, podUID, snapshotID string) []string {
-	cmd := &command{
-		baseName:   "/restic-wrapper",
-		command:    "restore",
-		repoPrefix: repoPrefix,
-		repo:       namespace,
-		args:       []string{snapshotID},
-		extraFlags: []string{restoreTargetFlag(podUID)},
-	}
-
-	return cmd.StringSlice()
 }
