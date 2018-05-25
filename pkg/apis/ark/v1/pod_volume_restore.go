@@ -23,9 +23,6 @@ import (
 
 // PodVolumeRestoreSpec is the specification for a PodVolumeRestore.
 type PodVolumeRestoreSpec struct {
-	// Node is the name of the node that the Pod is running on.
-	Node string `json:"node"`
-
 	// Pod is a reference to the pod containing the volume to be restored.
 	Pod corev1api.ObjectReference `json:"pod"`
 

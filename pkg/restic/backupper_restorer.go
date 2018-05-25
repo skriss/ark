@@ -295,7 +295,6 @@ func (br *backupperRestorer) createPodVolumeRestore(restore *arkv1api.Restore, p
 			},
 		},
 		Spec: arkv1api.PodVolumeRestoreSpec{
-			Node: pod.Spec.NodeName,
 			Pod: corev1api.ObjectReference{
 				Kind:      "Pod",
 				Namespace: pod.Namespace,

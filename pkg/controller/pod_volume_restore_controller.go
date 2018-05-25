@@ -117,15 +117,31 @@ func (c *podVolumeRestoreController) processQueueItem(key string) error {
 	}
 
 	// only process new items
-	switch req.Status.Phase {
-	case "", arkv1api.PodVolumeRestorePhaseNew:
-	default:
+	if req.Status.Phase != "" && req.Status.Phase != arkv1api.PodVolumeRestorePhaseNew {
 		return nil
 	}
 
-	// only process items for this node
-	if req.Spec.Node != c.nodeName {
+	pod, err := c.podLister.Pods(req.Spec.Pod.Namespace).Get(req.Spec.Pod.Name)
+	if err != nil {
+		log.WithError(err).Errorf("Unable to get pod %s/%s", req.Spec.Pod.Namespace, req.Spec.Pod.Name)
+		return errors.WithStack(err)
+	}
+
+	// return unscheduled pods to the queue
+	if pod.Spec.NodeName == "" {
+		log.Warnf("Pod has not been assigned a node yet, returning item to queue")
+		return errors.New("pod has not been assigned a node")
+	}
+
+	// only process items for pods on this node
+	if pod.Spec.NodeName != c.nodeName {
 		return nil
+	}
+
+	// only process items for pods that have their first initContainer running
+	if statuses := pod.Status.InitContainerStatuses; len(statuses) == 0 || statuses[0].State.Running == nil {
+		log.Warn("Pod's first initContainer is not running, returning item to queue")
+		return errors.New("pod's first initContainer is not running")
 	}
 
 	// Don't mutate the shared cache

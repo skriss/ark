@@ -651,41 +651,6 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 			}
 		}
 
-		if groupResource == kuberesource.Pods && len(restic.GetPodSnapshotAnnotations(obj)) > 0 {
-			if resourceWatch == nil {
-				resourceWatch, err = resourceClient.Watch(metav1.ListOptions{})
-				if err != nil {
-					addToResult(&errs, namespace, fmt.Errorf("error watching for namespace %q, resource %q: %v", namespace, &groupResource, err))
-					return warnings, errs
-				}
-				ctx.resourceWatches = append(ctx.resourceWatches, resourceWatch)
-			}
-
-			ctx.resourceWaitGroup.Add(1)
-			go func() {
-				defer ctx.resourceWaitGroup.Done()
-
-				// block until pod is ready for restic restore (ok to ignore error since we don't have a timeout
-				// set so no errors can be returned)
-				readyObj, _ := waitForReady(resourceWatch.ResultChan(), obj.GetName(), isPodReady, 0, ctx.logger)
-
-				ctx.globalWaitGroup.Add(1)
-				go func() {
-					defer ctx.globalWaitGroup.Done()
-
-					pod := new(v1.Pod)
-					if err := runtime.DefaultUnstructuredConverter.FromUnstructured(readyObj.UnstructuredContent(), &pod); err != nil {
-						ctx.logger.WithError(err).Error("error converting unstructured pod")
-						return
-					}
-
-					if err := ctx.resticRestorer.RestorePodVolumes(ctx.restore, pod, ctx.logger); err != nil {
-						ctx.logger.WithError(err).Error("unable to successfully complete restic restore of pod's volumes")
-					}
-				}()
-			}()
-		}
-
 		for _, action := range applicableActions {
 			if !action.selector.Matches(labels.Set(obj.GetLabels())) {
 				continue
@@ -731,7 +696,7 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 		addLabel(obj, api.RestoreLabelKey, ctx.restore.Name)
 
 		ctx.infof("Restoring %s: %v", obj.GroupVersionKind().Kind, obj.GetName())
-		_, restoreErr := resourceClient.Create(obj)
+		createdObj, restoreErr := resourceClient.Create(obj)
 		if apierrors.IsAlreadyExists(restoreErr) {
 			equal := false
 			if fromCluster, err := resourceClient.Get(obj.GetName(), metav1.GetOptions{}); err == nil {
@@ -754,6 +719,23 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 			ctx.infof("error restoring %s: %v", obj.GetName(), err)
 			addToResult(&errs, namespace, fmt.Errorf("error restoring %s: %v", fullPath, restoreErr))
 			continue
+		}
+
+		if groupResource == kuberesource.Pods && len(restic.GetPodSnapshotAnnotations(obj)) > 0 {
+			ctx.globalWaitGroup.Add(1)
+			go func() {
+				defer ctx.globalWaitGroup.Done()
+
+				pod := new(v1.Pod)
+				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(createdObj.UnstructuredContent(), &pod); err != nil {
+					ctx.logger.WithError(err).Error("error converting unstructured pod")
+					return
+				}
+
+				if err := ctx.resticRestorer.RestorePodVolumes(ctx.restore, pod, ctx.logger); err != nil {
+					ctx.logger.WithError(err).Error("unable to successfully complete restic restore of pod's volumes")
+				}
+			}()
 		}
 	}
 
@@ -798,25 +780,6 @@ func waitForReady(
 			return nil, errors.New("failed to observe item becoming ready within the timeout")
 		}
 	}
-}
-
-func isPodReady(obj runtime.Unstructured) bool {
-	var pod v1.Pod
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), &pod); err != nil {
-		return false
-	}
-
-	if pod.Status.Phase == v1.PodRunning {
-		return true
-	}
-
-	for _, status := range pod.Status.InitContainerStatuses {
-		if status.State.Running != nil {
-			return true
-		}
-	}
-
-	return false
 }
 
 func (ctx *context) executePVAction(obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
