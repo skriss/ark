@@ -62,6 +62,9 @@ type PodVolumeBackupStatus struct {
 
 	// SnapshotID is the identifier for the snapshot of the pod volume.
 	SnapshotID string `json:"snapshotID"`
+
+	// Message is a message about the pod volume backup's status.
+	Message string `json:"message"`
 }
 
 // +genclient

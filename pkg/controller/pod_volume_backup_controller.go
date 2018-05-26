@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -150,13 +151,13 @@ func (c *podVolumeBackupController) processBackup(req *arkv1api.PodVolumeBackup)
 	pod, err := c.podLister.Pods(req.Spec.Pod.Namespace).Get(req.Spec.Pod.Name)
 	if err != nil {
 		log.WithError(err).Errorf("Error getting pod %s/%s", req.Spec.Pod.Namespace, req.Spec.Pod.Name)
-		return c.fail(req, log)
+		return c.fail(req, errors.Wrap(err, "error getting pod").Error(), log)
 	}
 
 	volumeDir, err := kube.GetVolumeDirectory(pod, req.Spec.Volume, c.pvcLister)
 	if err != nil {
 		log.WithError(err).Error("Error getting volume directory name")
-		return c.fail(req, log)
+		return c.fail(req, errors.Wrap(err, "error getting volume directory name").Error(), log)
 	}
 
 	path, err := singlePathMatch(fmt.Sprintf("/host_pods/%s/volumes/*/%s", string(req.Spec.Pod.UID), volumeDir))
@@ -171,7 +172,7 @@ func (c *podVolumeBackupController) processBackup(req *arkv1api.PodVolumeBackup)
 	file, err := restic.TempCredentialsFile(c.secretLister, "restic-credentials", req.Namespace, req.Spec.Pod.Namespace)
 	if err != nil {
 		log.WithError(err).Error("Error creating temp restic credentials file")
-		return c.fail(req, log)
+		return c.fail(req, errors.Wrap(err, "error creating temp restic credentials file").Error(), log)
 	}
 
 	defer file.Close()
@@ -185,19 +186,23 @@ func (c *podVolumeBackupController) processBackup(req *arkv1api.PodVolumeBackup)
 		req.Spec.Tags,
 	)
 
-	res, err := resticCmd.Cmd().CombinedOutput()
-	log.Infof("Ran restic command=%s, output=%s", resticCmd.String(), res)
-
+	output, err := resticCmd.Cmd().Output()
+	log.Debugf("Ran command=%s, stdout=%s", resticCmd.String(), output)
 	if err != nil {
-		// TODO include error on CR
-		// update status to Failed
-		return c.fail(req, log)
+		var stderr string
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr = string(exitErr.Stderr)
+		}
+
+		log.WithError(err).Errorf("Error running command=%s, stdout=%s, stderr=%s", resticCmd.String(), output, stderr)
+
+		return c.fail(req, fmt.Sprintf("error running restic backup, stderr=%s: %s", stderr, err.Error()), log)
 	}
 
 	snapshotID, err := restic.GetSnapshotID(req.Spec.RepoPrefix, req.Spec.Pod.Namespace, file.Name(), req.Spec.Tags)
 	if err != nil {
 		log.WithError(err).Error("Error getting SnapshotID")
-		return c.fail(req, log)
+		return c.fail(req, errors.Wrap(err, "error getting snapshot id").Error(), log)
 	}
 
 	// update status to Completed with path & snapshot id
@@ -243,8 +248,11 @@ func (c *podVolumeBackupController) patchPodVolumeBackup(req *arkv1api.PodVolume
 	return req, nil
 }
 
-func (c *podVolumeBackupController) fail(req *arkv1api.PodVolumeBackup, log logrus.FieldLogger) error {
-	if _, err := c.patchPodVolumeBackup(req, updatePhaseFunc(arkv1api.PodVolumeBackupPhaseFailed)); err != nil {
+func (c *podVolumeBackupController) fail(req *arkv1api.PodVolumeBackup, msg string, log logrus.FieldLogger) error {
+	if _, err := c.patchPodVolumeBackup(req, func(r *arkv1api.PodVolumeBackup) {
+		r.Status.Phase = arkv1api.PodVolumeBackupPhaseFailed
+		r.Status.Message = msg
+	}); err != nil {
 		log.WithError(err).Error("Error setting phase to Failed")
 		return err
 	}

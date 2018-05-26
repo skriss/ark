@@ -18,6 +18,7 @@ package controller
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -167,35 +168,22 @@ func (c *podVolumeRestoreController) processRestore(req *arkv1api.PodVolumeResto
 	pod, err := c.podLister.Pods(req.Spec.Pod.Namespace).Get(req.Spec.Pod.Name)
 	if err != nil {
 		log.WithError(err).Errorf("Error getting pod %s/%s", req.Spec.Pod.Namespace, req.Spec.Pod.Name)
-		return c.fail(req, log)
+		return c.fail(req, errors.Wrap(err, "error getting pod").Error(), log)
 	}
 
 	volumeDir, err := kube.GetVolumeDirectory(pod, req.Spec.Volume, c.pvcLister)
 	if err != nil {
 		log.WithError(err).Error("Error getting volume directory name")
-		return c.fail(req, log)
+		return c.fail(req, errors.Wrap(err, "error getting volume directory name").Error(), log)
 	}
 
-	// matches, err := filepath.Glob(fmt.Sprintf("/host_pods/%s/volumes/*/%s/", string(req.Spec.Pod.UID), volumeDir))
-	// if err != nil {
-	// 	log.WithError(err).Error("Error matching volume path")
-	// 	return errors.WithStack(err)
-	// }
-	// if len(matches) != 1 {
-	// 	log.Errorf("Found %d matches for volume path", len(matches))
-	// 	return errors.New("cannot uniquely identify volume path")
-	// }
-
-	// req.Status.Path = matches[0]
-
-	// NOTE temp-creds creation is all copy-pasta from repositoryManager.exec()
 	// TODO creds should move into the pod's namespace
 
 	// temp creds
 	file, err := restic.TempCredentialsFile(c.secretLister, "restic-credentials", req.Namespace, req.Spec.Pod.Namespace)
 	if err != nil {
 		log.WithError(err).Error("Error creating temp restic credentials file")
-		return c.fail(req, log)
+		return c.fail(req, errors.Wrap(err, "error creating temp restic credentials file").Error(), log)
 	}
 
 	defer file.Close()
@@ -209,13 +197,16 @@ func (c *podVolumeRestoreController) processRestore(req *arkv1api.PodVolumeResto
 		req.Spec.SnapshotID,
 	)
 
-	// exec command
-	res, err := resticCmd.Cmd().CombinedOutput()
-	log.Infof("Ran restic command=%s, output=%s", resticCmd.String(), res)
+	output, err := resticCmd.Cmd().Output()
+	log.Debugf("Ran command=%s, stdout=%s", resticCmd.String(), output)
 	if err != nil {
-		// TODO include error on CR
-		// update status to Failed
-		return c.fail(req, log)
+		var stderr string
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr = string(exitErr.Stderr)
+		}
+		log.WithError(err).Errorf("Error running command=%s, stdout=%s, stderr=%s", resticCmd.String(), output, stderr)
+
+		return c.fail(req, fmt.Sprintf("error running restic restore, stderr=%s: %s", stderr, err.Error()), log)
 	}
 
 	var restoreUID types.UID
@@ -225,13 +216,18 @@ func (c *podVolumeRestoreController) processRestore(req *arkv1api.PodVolumeResto
 			break
 		}
 	}
-	// TODO handle error?
-	cmdArgs := []string{"/complete-restore.sh", string(req.Spec.Pod.UID), volumeDir, string(restoreUID)}
-	cmd := exec.Command("/bin/sh", "-c", strings.Join(cmdArgs, " "))
-	res, err = cmd.CombinedOutput()
-	log.Infof("Ran command=%v, output=%s", cmd.Args, res)
+
+	cmd := exec.Command("/bin/sh", "-c", strings.Join([]string{"/complete-restore.sh", string(req.Spec.Pod.UID), volumeDir, string(restoreUID)}, " "))
+	output, err = cmd.Output()
+	log.Debugf("Ran command=%s, stdout=%s", cmd.Args, output)
 	if err != nil {
-		return c.fail(req, log)
+		var stderr string
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr = string(exitErr.Stderr)
+		}
+		log.WithError(err).Errorf("Error running command=%s, stdout=%s, stderr=%s", cmd.Args, output, stderr)
+
+		return c.fail(req, fmt.Sprintf("error running restic restore: %s: stderr=%s", err.Error(), stderr), log)
 	}
 
 	// update status to Completed
@@ -272,8 +268,11 @@ func (c *podVolumeRestoreController) patchPodVolumeRestore(req *arkv1api.PodVolu
 	return req, nil
 }
 
-func (c *podVolumeRestoreController) fail(req *arkv1api.PodVolumeRestore, log logrus.FieldLogger) error {
-	if _, err := c.patchPodVolumeRestore(req, updatePodVolumeRestorePhaseFunc(arkv1api.PodVolumeRestorePhaseFailed)); err != nil {
+func (c *podVolumeRestoreController) fail(req *arkv1api.PodVolumeRestore, msg string, log logrus.FieldLogger) error {
+	if _, err := c.patchPodVolumeRestore(req, func(pvr *arkv1api.PodVolumeRestore) {
+		pvr.Status.Phase = arkv1api.PodVolumeRestorePhaseFailed
+		pvr.Status.Message = msg
+	}); err != nil {
 		log.WithError(err).Error("Error setting phase to Failed")
 		return err
 	}

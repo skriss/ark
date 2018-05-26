@@ -2,16 +2,18 @@ package restic
 
 import (
 	"encoding/json"
+	"os/exec"
 
 	"github.com/pkg/errors"
 )
 
 func GetSnapshotID(repoPrefix, repo, passwordFile string, tags map[string]string) (string, error) {
-	cmd := GetSnapshotCommand(repoPrefix, repo, passwordFile, tags)
-
-	res, err := cmd.Cmd().Output()
+	output, err := GetSnapshotCommand(repoPrefix, repo, passwordFile, tags).Cmd().Output()
 	if err != nil {
-		return "", errors.WithStack(err)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", errors.Wrapf(err, "error running command, stderr=%s", exitErr.Stderr)
+		}
+		return "", errors.Wrap(err, "error running command")
 	}
 
 	type snapshotID struct {
@@ -19,7 +21,7 @@ func GetSnapshotID(repoPrefix, repo, passwordFile string, tags map[string]string
 	}
 
 	var snapshots []snapshotID
-	if err := json.Unmarshal(res, &snapshots); err != nil {
+	if err := json.Unmarshal(output, &snapshots); err != nil {
 		return "", errors.Wrap(err, "error unmarshalling restic snapshots result")
 	}
 

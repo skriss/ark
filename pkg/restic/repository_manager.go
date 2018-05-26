@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/evanphx/json-patch"
@@ -233,7 +234,7 @@ ForLoop:
 			case arkv1api.PodVolumeBackupPhaseCompleted:
 				SetPodSnapshotAnnotation(pod, res.Spec.Volume, res.Status.SnapshotID)
 			case arkv1api.PodVolumeBackupPhaseFailed:
-				errs = append(errs, errors.New("PodVolumeBackup failed"))
+				errs = append(errs, errors.Errorf("pod volume backup failed: %s", res.Status.Message))
 			}
 		}
 	}
@@ -327,7 +328,7 @@ ForLoop:
 			break ForLoop
 		case res := <-resultChan:
 			if res.Status.Phase == arkv1api.PodVolumeRestorePhaseFailed {
-				errs = append(errs, errors.New("PodVolumeRestore failed"))
+				errs = append(errs, errors.Errorf("pod volume restore failed: %s", res.Status.Message))
 			}
 		}
 	}
@@ -560,10 +561,16 @@ func (rm *repositoryManager) exec(cmd *Command) ([]byte, error) {
 	// use the temp creds file for running the command
 	cmd.PasswordFile = file.Name()
 
-	res, err := cmd.Cmd().Output()
-	rm.log.WithField("repository", cmd.Repo).Debugf("Ran restic command=%q, output=%s", cmd.String(), res)
+	output, err := cmd.Cmd().Output()
+	rm.log.WithField("repository", cmd.Repo).Debugf("Ran restic command=%q, output=%s", cmd.String(), output)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, errors.Wrapf(err, "error running command, stderr=%s", exitErr.Stderr)
+		}
+		return nil, errors.Wrap(err, "error running command")
+	}
 
-	return res, errors.WithStack(err)
+	return output, nil
 }
 
 func errorOnly(_ interface{}, err error) error {

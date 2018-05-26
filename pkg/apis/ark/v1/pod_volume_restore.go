@@ -51,6 +51,9 @@ const (
 type PodVolumeRestoreStatus struct {
 	// Phase is the current state of the PodVolumeRestore.
 	Phase PodVolumeRestorePhase `json:"phase"`
+
+	// Message is a message about the pod volume restore's status.
+	Message string `json:"message"`
 }
 
 // +genclient
