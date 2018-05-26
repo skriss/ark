@@ -46,12 +46,23 @@ import (
 	"github.com/heptio/ark/pkg/util/sync"
 )
 
-// TODO this is more like a metadata manager
+// RepositoryManager executes commands against restic repositories.
 type RepositoryManager interface {
+	// CheckRepo checks the specified repo for errors.
 	CheckRepo(name string) error
+
+	// CheckAllRepos checks all repos for errors.
 	CheckAllRepos() error
+
+	// PruneRepo deletes unused data from a repo.
 	PruneRepo(name string) error
+
+	// PruneAllRepos deletes unused data from all
+	// repos.
 	PruneAllRepos() error
+
+	// Forget removes a snapshot from the list of
+	// availabel snapshots in a repo.
 	Forget(repo, snapshotID string) error
 
 	Backupper
@@ -60,11 +71,13 @@ type RepositoryManager interface {
 
 // Backupper can execute restic backups of volumes in a pod.
 type Backupper interface {
+	// BackupPodVolumes backs up all annotated volumes in a pod.
 	BackupPodVolumes(ctx context.Context, backup *arkv1api.Backup, pod *corev1api.Pod, log logrus.FieldLogger) error
 }
 
 // Restorer can execute restic restores of volumes in a pod.
 type Restorer interface {
+	// RestorePodVolumes restores all annotated volumes in a pod.
 	RestorePodVolumes(ctx context.Context, restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error
 }
 

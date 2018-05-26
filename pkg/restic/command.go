@@ -22,6 +22,7 @@ import (
 	"strings"
 )
 
+// Command represents a restic command.
 type Command struct {
 	BaseName     string
 	Command      string
@@ -32,6 +33,7 @@ type Command struct {
 	ExtraFlags   []string
 }
 
+// StringSlice returns the command as a slice of strings.
 func (c *Command) StringSlice() []string {
 	var res []string
 	if c.BaseName != "" {
@@ -50,10 +52,12 @@ func (c *Command) StringSlice() []string {
 	return res
 }
 
+// String returns the command as a string.
 func (c *Command) String() string {
 	return strings.Join(c.StringSlice(), " ")
 }
 
+// Cmd returns an exec.Cmd for the command.
 func (c *Command) Cmd() *exec.Cmd {
 	parts := c.StringSlice()
 	return exec.Command(parts[0], parts[1:]...)

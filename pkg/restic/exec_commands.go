@@ -7,6 +7,9 @@ import (
 	"github.com/pkg/errors"
 )
 
+// GetSnapshotID runs a 'restic snapshots' command to get the ID of the snapshot
+// in the specified repo matching the set of provided tags, or an error if a
+// unique snapshot cannot be identified.
 func GetSnapshotID(repoPrefix, repo, passwordFile string, tags map[string]string) (string, error) {
 	output, err := GetSnapshotCommand(repoPrefix, repo, passwordFile, tags).Cmd().Output()
 	if err != nil {

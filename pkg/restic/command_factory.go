@@ -5,6 +5,7 @@ import (
 	"strings"
 )
 
+// BackupCommand returns a Command for running a restic backup.
 func BackupCommand(repoPrefix, repo, passwordFile, path string, tags map[string]string) *Command {
 	return &Command{
 		Command:      "backup",
@@ -24,6 +25,7 @@ func backupTagFlags(tags map[string]string) []string {
 	return flags
 }
 
+// RestoreCommand returns a Command for running a restic restore.
 func RestoreCommand(repoPrefix, repo, passwordFile, podUID, snapshotID string) *Command {
 	return &Command{
 		Command:      "restore",
@@ -35,6 +37,7 @@ func RestoreCommand(repoPrefix, repo, passwordFile, podUID, snapshotID string) *
 	}
 }
 
+// GetSnapshotCommand returns a Command for running a restic (get) snapshots.
 func GetSnapshotCommand(repoPrefix, repo, passwordFile string, tags map[string]string) *Command {
 	return &Command{
 		Command:      "snapshots",

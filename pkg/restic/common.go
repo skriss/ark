@@ -38,8 +38,9 @@ const (
 	volumesToBackupAnnotation = "backup.ark.heptio.com/backup-volumes"
 )
 
-// TODO audit functions, make private (?)
-
+// PodHasSnapshotAnnotation returns true if the object has an annotation
+// indicating that there is a restic snapshot for a volume in this pod,
+// or false otherwise.
 func PodHasSnapshotAnnotation(obj metav1.Object) bool {
 	for key := range obj.GetAnnotations() {
 		if strings.HasPrefix(key, podAnnotationPrefix) {
@@ -50,6 +51,8 @@ func PodHasSnapshotAnnotation(obj metav1.Object) bool {
 	return false
 }
 
+// GetPodSnapshotAnnotations returns a map, of volume name -> snapshot id,
+// of all restic snapshots for this pod.
 func GetPodSnapshotAnnotations(obj metav1.Object) map[string]string {
 	var res map[string]string
 
@@ -66,6 +69,8 @@ func GetPodSnapshotAnnotations(obj metav1.Object) map[string]string {
 	return res
 }
 
+// SetPodSnapshotAnnotation adds an annotation to a pod to indicate that
+// the specified volume has a restic snapshot with the provided id.
 func SetPodSnapshotAnnotation(obj metav1.Object, volumeName, snapshotID string) {
 	annotations := obj.GetAnnotations()
 
@@ -78,6 +83,8 @@ func SetPodSnapshotAnnotation(obj metav1.Object, volumeName, snapshotID string) 
 	obj.SetAnnotations(annotations)
 }
 
+// GetVolumesToBackup returns a list of volume names to backup for
+// the provided pod.
 func GetVolumesToBackup(obj metav1.Object) []string {
 	annotations := obj.GetAnnotations()
 	if annotations == nil {
@@ -102,6 +109,8 @@ func GetVolumesToBackup(obj metav1.Object) []string {
 	return backups
 }
 
+// GetSnapshotsInBackup returns a list of all restic snapshot ids associated with
+// a given Ark backup.
 func GetSnapshotsInBackup(backup *arkv1api.Backup, podVolumeBackupLister arkv1listers.PodVolumeBackupLister) ([]string, error) {
 	selector, err := labels.Parse(fmt.Sprintf("%s=%s", arkv1api.BackupNameLabel, backup.Name))
 	if err != nil {
@@ -124,6 +133,8 @@ func GetSnapshotsInBackup(backup *arkv1api.Backup, podVolumeBackupLister arkv1li
 	return res, nil
 }
 
+// TempCredentialsFile creates and returns a temp file containing a restic
+// encryption key for the given repo.
 func TempCredentialsFile(secretLister corev1listers.SecretLister, secretName, secretNamespace, repoName string) (*os.File, error) {
 	secret, err := secretLister.Secrets(secretNamespace).Get(secretName)
 	if err != nil {
