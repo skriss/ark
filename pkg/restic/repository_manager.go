@@ -48,9 +48,6 @@ import (
 
 // TODO this is more like a metadata manager
 type RepositoryManager interface {
-	RepoPrefix() string
-	RepositoryExists(name string) (bool, error)
-	InitRepo(name string) error
 	CheckRepo(name string) error
 	CheckAllRepos() error
 	PruneRepo(name string) error
@@ -135,14 +132,8 @@ func (rm *repositoryManager) BackupPodVolumes(ctx context.Context, backup *arkv1
 	}
 
 	// ensure a repo exists for the pod's namespace
-	exists, err := rm.RepositoryExists(pod.Namespace)
-	if err != nil {
+	if err := rm.ensureRepo(pod.Namespace); err != nil {
 		return err
-	}
-	if !exists {
-		if err := rm.InitRepo(pod.Namespace); err != nil {
-			return err
-		}
 	}
 
 	resultChan := make(chan *arkv1api.PodVolumeBackup)
@@ -336,26 +327,18 @@ ForLoop:
 	return kerrs.NewAggregate(errs)
 }
 
-func (rm *repositoryManager) RepoPrefix() string {
-	return rm.repoPrefix
-}
-
-func (rm *repositoryManager) RepositoryExists(name string) (bool, error) {
+func (rm *repositoryManager) ensureRepo(name string) error {
 	repos, err := rm.getAllRepos()
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	for _, repo := range repos {
 		if repo == name {
-			return true, nil
+			return nil
 		}
 	}
 
-	return false, nil
-}
-
-func (rm *repositoryManager) InitRepo(name string) error {
 	rm.repoLocker.Lock(name, true)
 	defer rm.repoLocker.Unlock(name, true)
 
