@@ -26,7 +26,6 @@ import (
 
 	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/cache"
 
 	arkv1api "github.com/heptio/ark/pkg/apis/ark/v1"
@@ -36,7 +35,7 @@ import (
 // Backupper can execute restic backups of volumes in a pod.
 type Backupper interface {
 	// BackupPodVolumes backs up all annotated volumes in a pod.
-	BackupPodVolumes(backup *arkv1api.Backup, pod *corev1api.Pod, log logrus.FieldLogger) error
+	BackupPodVolumes(backup *arkv1api.Backup, pod *corev1api.Pod, log logrus.FieldLogger) (map[string]string, []error)
 }
 
 type backupper struct {
@@ -51,21 +50,26 @@ func resultsKey(ns, name string) string {
 	return fmt.Sprintf("%s/%s", ns, name)
 }
 
-func (b *backupper) BackupPodVolumes(backup *arkv1api.Backup, pod *corev1api.Pod, log logrus.FieldLogger) error {
+func (b *backupper) BackupPodVolumes(backup *arkv1api.Backup, pod *corev1api.Pod, log logrus.FieldLogger) (map[string]string, []error) {
 	// get volumes to backup from pod's annotations
 	volumesToBackup := GetVolumesToBackup(pod)
 	if len(volumesToBackup) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// ensure a repo exists for the pod's namespace
 	if err := b.repoManager.ensureRepo(pod.Namespace); err != nil {
-		return err
+		return nil, []error{err}
 	}
 
 	b.resultsLock.Lock()
 	b.results[resultsKey(pod.Namespace, pod.Name)] = make(chan *arkv1api.PodVolumeBackup)
 	b.resultsLock.Unlock()
+
+	var (
+		errs            []error
+		volumeSnapshots = make(map[string]string)
+	)
 
 	for _, volumeName := range volumesToBackup {
 		b.repoManager.repoLocker.Lock(pod.Namespace, false)
@@ -110,16 +114,16 @@ func (b *backupper) BackupPodVolumes(backup *arkv1api.Backup, pod *corev1api.Pod
 			},
 		}
 
-		// TODO should we return here, or continue with what we can?
 		if err := errorOnly(b.repoManager.arkClient.ArkV1().PodVolumeBackups(volumeBackup.Namespace).Create(volumeBackup)); err != nil {
-			return errors.WithStack(err)
+			errs = append(errs, err)
+			continue
 		}
+
+		volumeSnapshots[volumeName] = ""
 	}
 
-	var errs []error
-
 ForEachVolume:
-	for i := 0; i < len(volumesToBackup); i++ {
+	for i, count := 0, len(volumeSnapshots); i < count; i++ {
 		select {
 		case <-b.ctx.Done():
 			errs = append(errs, errors.New("timed out waiting for all PodVolumeBackups to complete"))
@@ -127,11 +131,10 @@ ForEachVolume:
 		case res := <-b.results[resultsKey(pod.Namespace, pod.Name)]:
 			switch res.Status.Phase {
 			case arkv1api.PodVolumeBackupPhaseCompleted:
-				// TODO rather than mutating the backup and pod (i.e. annotating), return the
-				// results and have something else annotate
-				SetPodSnapshotAnnotation(pod, res.Spec.Volume, res.Status.SnapshotID)
+				volumeSnapshots[res.Spec.Volume] = res.Status.SnapshotID
 			case arkv1api.PodVolumeBackupPhaseFailed:
 				errs = append(errs, errors.Errorf("pod volume backup failed: %s", res.Status.Message))
+				delete(volumeSnapshots, res.Spec.Volume)
 			}
 		}
 	}
@@ -140,5 +143,5 @@ ForEachVolume:
 	delete(b.results, resultsKey(pod.Namespace, pod.Name))
 	b.resultsLock.Unlock()
 
-	return kerrs.NewAggregate(errs)
+	return volumeSnapshots, errs
 }

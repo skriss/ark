@@ -196,17 +196,24 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 			return errors.WithStack(err)
 		}
 
-		if err := ib.resticBackupper.BackupPodVolumes(ib.backup, pod, log); err != nil {
-			return err
+		volumeSnapshots, errs := ib.resticBackupper.BackupPodVolumes(ib.backup, pod, log)
+		if len(errs) > 0 {
+			backupErrs = append(backupErrs, errs...)
 		}
 
-		// pod was modified by BackupPodVolumes if there were any volumes backed up, so
-		// convert it back to unstructured and assign to obj. so it gets persisted.
-		unstructuredObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod)
-		if err != nil {
-			return errors.WithStack(err)
+		if len(volumeSnapshots) > 0 {
+			// annotate the pod with the successful volume snapshots
+			for volume, snapshot := range volumeSnapshots {
+				restic.SetPodSnapshotAnnotation(pod, volume, snapshot)
+			}
+
+			// update obj to reflect the annotations
+			unstructuredObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod)
+			if err != nil {
+				return errors.WithStack(err)
+			}
+			obj = &unstructured.Unstructured{Object: unstructuredObj}
 		}
-		obj = &unstructured.Unstructured{Object: unstructuredObj}
 	}
 
 	log.Debug("Executing post hooks")
