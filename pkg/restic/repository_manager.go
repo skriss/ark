@@ -65,14 +65,16 @@ type RepositoryManager interface {
 	// availabel snapshots in a repo.
 	Forget(repo, snapshotID string) error
 
-	Backupper
+	BackupperFactory
+
 	Restorer
 }
 
-// Backupper can execute restic backups of volumes in a pod.
-type Backupper interface {
-	// BackupPodVolumes backs up all annotated volumes in a pod.
-	BackupPodVolumes(ctx context.Context, backup *arkv1api.Backup, pod *corev1api.Pod, log logrus.FieldLogger) error
+// BackupperFactory can construct restic backuppers.
+type BackupperFactory interface {
+	// Backupper returns a restic backupper for use during a single
+	// Ark backup.
+	Backupper(context.Context, *arkv1api.Backup) (Backupper, error)
 }
 
 // Restorer can execute restic restores of volumes in a pod.
@@ -161,116 +163,41 @@ func NewRepositoryManager(
 		log:           log,
 		repoLocker:    newRepoLocker(),
 	}
-
 }
 
-func (rm *repositoryManager) BackupPodVolumes(ctx context.Context, backup *arkv1api.Backup, pod *corev1api.Pod, log logrus.FieldLogger) error {
-	// get volumes to backup from pod's annotations
-	volumesToBackup := GetVolumesToBackup(pod)
-	if len(volumesToBackup) == 0 {
-		return nil
+func (rm *repositoryManager) Backupper(ctx context.Context, backup *arkv1api.Backup) (Backupper, error) {
+	b := &backupper{
+		repoManager: rm,
+		informer: arkv1informers.NewFilteredPodVolumeBackupInformer(
+			rm.arkClient,
+			backup.Namespace,
+			0,
+			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+			func(opts *metav1.ListOptions) {
+				opts.LabelSelector = fmt.Sprintf("%s=%s", arkv1api.BackupUIDLabel, backup.UID)
+			},
+		),
+		results: make(map[string]chan *arkv1api.PodVolumeBackup),
+		ctx:     ctx,
 	}
 
-	// ensure a repo exists for the pod's namespace
-	if err := rm.ensureRepo(pod.Namespace); err != nil {
-		return err
-	}
-
-	resultChan := make(chan *arkv1api.PodVolumeBackup)
-
-	informer := arkv1informers.NewFilteredPodVolumeBackupInformer(
-		rm.arkClient,
-		backup.Namespace,
-		0,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		func(opts *metav1.ListOptions) {
-			opts.LabelSelector = fmt.Sprintf("%s=%s", arkv1api.BackupNameLabel, backup.Name)
-		},
-	)
-	informer.AddEventHandler(
+	b.informer.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			UpdateFunc: func(_, obj interface{}) {
 				pvb := obj.(*arkv1api.PodVolumeBackup)
 
 				if pvb.Status.Phase == arkv1api.PodVolumeBackupPhaseCompleted || pvb.Status.Phase == arkv1api.PodVolumeBackupPhaseFailed {
-					resultChan <- pvb
+					b.results[resultsKey(pvb.Spec.Pod.Namespace, pvb.Spec.Pod.Name)] <- pvb
 				}
 			},
 		},
 	)
-	go informer.Run(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
-		return errors.New("timed out waiting for cache to sync")
+	go b.informer.Run(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), b.informer.HasSynced) {
+		return nil, errors.New("timed out waiting for cache to sync")
 	}
 
-	for _, volumeName := range volumesToBackup {
-		rm.repoLocker.Lock(pod.Namespace, false)
-		defer rm.repoLocker.Unlock(pod.Namespace, false)
-
-		volumeBackup := &arkv1api.PodVolumeBackup{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace:    backup.Namespace,
-				GenerateName: backup.Name + "-",
-				OwnerReferences: []metav1.OwnerReference{
-					{
-						APIVersion: arkv1api.SchemeGroupVersion.String(),
-						Kind:       "Backup",
-						Name:       backup.Name,
-						UID:        backup.UID,
-						Controller: boolptr.True(),
-					},
-				},
-				Labels: map[string]string{
-					arkv1api.BackupNameLabel: backup.Name,
-					arkv1api.BackupUIDLabel:  string(backup.UID),
-				},
-			},
-			Spec: arkv1api.PodVolumeBackupSpec{
-				Node: pod.Spec.NodeName,
-				Pod: corev1api.ObjectReference{
-					Kind:      "Pod",
-					Namespace: pod.Namespace,
-					Name:      pod.Name,
-					UID:       pod.UID,
-				},
-				Volume: volumeName,
-				Tags: map[string]string{
-					"backup":     backup.Name,
-					"backup-uid": string(backup.UID),
-					"pod":        pod.Name,
-					"pod-uid":    string(pod.UID),
-					"ns":         pod.Namespace,
-					"volume":     volumeName,
-				},
-				RepoPrefix: rm.config.repoPrefix,
-			},
-		}
-
-		// TODO should we return here, or continue with what we can?
-		if err := errorOnly(rm.arkClient.ArkV1().PodVolumeBackups(volumeBackup.Namespace).Create(volumeBackup)); err != nil {
-			return errors.WithStack(err)
-		}
-	}
-
-	var errs []error
-
-ForEachVolume:
-	for i := 0; i < len(volumesToBackup); i++ {
-		select {
-		case <-ctx.Done():
-			errs = append(errs, errors.New("timed out waiting for all PodVolumeBackups to complete"))
-			break ForEachVolume
-		case res := <-resultChan:
-			switch res.Status.Phase {
-			case arkv1api.PodVolumeBackupPhaseCompleted:
-				SetPodSnapshotAnnotation(pod, res.Spec.Volume, res.Status.SnapshotID)
-			case arkv1api.PodVolumeBackupPhaseFailed:
-				errs = append(errs, errors.Errorf("pod volume backup failed: %s", res.Status.Message))
-			}
-		}
-	}
-
-	return kerrs.NewAggregate(errs)
+	return b, nil
 }
 
 func (rm *repositoryManager) RestorePodVolumes(ctx context.Context, restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error {

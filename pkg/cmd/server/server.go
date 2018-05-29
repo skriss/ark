@@ -744,14 +744,14 @@ func newBackupper(
 	snapshotService cloudprovider.SnapshotService,
 	kubeClientConfig *rest.Config,
 	kubeCoreV1Client kcorev1client.CoreV1Interface,
-	resticBackupper restic.Backupper,
+	resticBackupperFactory restic.BackupperFactory,
 ) (backup.Backupper, error) {
 	return backup.NewKubernetesBackupper(
 		discoveryHelper,
 		client.NewDynamicFactory(clientPool),
 		podexec.NewPodCommandExecutor(kubeClientConfig, kubeCoreV1Client.RESTClient()),
 		snapshotService,
-		resticBackupper,
+		resticBackupperFactory,
 	)
 }
 

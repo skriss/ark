@@ -18,7 +18,6 @@ package backup
 
 import (
 	"archive/tar"
-	"context"
 	"encoding/json"
 	"path/filepath"
 	"time"
@@ -197,12 +196,7 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 			return errors.WithStack(err)
 		}
 
-		if err := func() error {
-			ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancelFunc()
-
-			return ib.resticBackupper.BackupPodVolumes(ctx, ib.backup, pod, log)
-		}(); err != nil {
+		if err := ib.resticBackupper.BackupPodVolumes(ib.backup, pod, log); err != nil {
 			return err
 		}
 

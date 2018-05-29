@@ -19,8 +19,10 @@ package backup
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -50,12 +52,12 @@ type Backupper interface {
 
 // kubernetesBackupper implements Backupper.
 type kubernetesBackupper struct {
-	dynamicFactory        client.DynamicFactory
-	discoveryHelper       discovery.Helper
-	podCommandExecutor    podexec.PodCommandExecutor
-	groupBackupperFactory groupBackupperFactory
-	snapshotService       cloudprovider.SnapshotService
-	resticBackupper       restic.Backupper
+	dynamicFactory         client.DynamicFactory
+	discoveryHelper        discovery.Helper
+	podCommandExecutor     podexec.PodCommandExecutor
+	groupBackupperFactory  groupBackupperFactory
+	snapshotService        cloudprovider.SnapshotService
+	resticBackupperFactory restic.BackupperFactory
 }
 
 type itemKey struct {
@@ -92,15 +94,15 @@ func NewKubernetesBackupper(
 	dynamicFactory client.DynamicFactory,
 	podCommandExecutor podexec.PodCommandExecutor,
 	snapshotService cloudprovider.SnapshotService,
-	resticBackupper restic.Backupper,
+	resticBackupperFactory restic.BackupperFactory,
 ) (Backupper, error) {
 	return &kubernetesBackupper{
-		discoveryHelper:       discoveryHelper,
-		dynamicFactory:        dynamicFactory,
-		podCommandExecutor:    podCommandExecutor,
-		groupBackupperFactory: &defaultGroupBackupperFactory{},
-		snapshotService:       snapshotService,
-		resticBackupper:       resticBackupper,
+		discoveryHelper:        discoveryHelper,
+		dynamicFactory:         dynamicFactory,
+		podCommandExecutor:     podCommandExecutor,
+		groupBackupperFactory:  &defaultGroupBackupperFactory{},
+		snapshotService:        snapshotService,
+		resticBackupperFactory: resticBackupperFactory,
 	}, nil
 }
 
@@ -245,6 +247,14 @@ func (kb *kubernetesBackupper) Backup(backup *api.Backup, backupFile, logFile io
 		return err
 	}
 
+	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancelFunc()
+
+	resticBackupper, err := kb.resticBackupperFactory.Backupper(ctx, backup)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
 	gb := kb.groupBackupperFactory.newGroupBackupper(
 		log,
 		backup,
@@ -259,7 +269,7 @@ func (kb *kubernetesBackupper) Backup(backup *api.Backup, backupFile, logFile io
 		tw,
 		resourceHooks,
 		kb.snapshotService,
-		kb.resticBackupper,
+		resticBackupper,
 	)
 
 	for _, group := range kb.discoveryHelper.Resources() {
