@@ -97,7 +97,7 @@ type repositoryManager struct {
 	objectStore   cloudprovider.ObjectStore
 	config        config
 	arkClient     clientset.Interface
-	secretsClient corev1client.SecretInterface
+	secretsGetter corev1client.SecretsGetter
 	log           logrus.FieldLogger
 	repoLocker    *repoLocker
 }
@@ -152,14 +152,14 @@ func NewRepositoryManager(
 	objectStore cloudprovider.ObjectStore,
 	config arkv1api.ObjectStorageProviderConfig,
 	arkClient clientset.Interface,
-	secretsClient corev1client.SecretInterface,
+	secretsGetter corev1client.SecretsGetter,
 	log logrus.FieldLogger,
 ) RepositoryManager {
 	return &repositoryManager{
 		objectStore:   objectStore,
 		config:        getConfig(config),
 		arkClient:     arkClient,
-		secretsClient: secretsClient,
+		secretsGetter: secretsGetter,
 		log:           log,
 		repoLocker:    newRepoLocker(),
 	}
@@ -252,15 +252,16 @@ func (rm *repositoryManager) ensureRepo(name string) error {
 	rm.repoLocker.Lock(name, true)
 	defer rm.repoLocker.Unlock(name, true)
 
-	resticCreds, err := rm.secretsClient.Get(credsSecret, metav1.GetOptions{})
+	resticCreds, err := rm.secretsGetter.Secrets(name).Get(credsSecret, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		secret := &corev1api.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: credsSecret,
+				Namespace: name,
+				Name:      credsSecret,
 			},
 			Type: corev1api.SecretTypeOpaque,
 		}
-		if resticCreds, err = rm.secretsClient.Create(secret); err != nil {
+		if resticCreds, err = rm.secretsGetter.Secrets(name).Create(secret); err != nil {
 			return errors.WithStack(err)
 		}
 	} else if err != nil {
@@ -269,7 +270,7 @@ func (rm *repositoryManager) ensureRepo(name string) error {
 
 	// do we already have a key for this repo? we shouldn't
 	if _, exists := resticCreds.Data[name]; exists {
-		return errors.New("restic-credentials secret already contains an encryption key for this repo")
+		return errors.Errorf("secret %s already contains an encryption key for this repo", credsSecret)
 	}
 
 	// generate an encryption key for the repo
@@ -303,8 +304,8 @@ func (rm *repositoryManager) ensureRepo(name string) error {
 	}
 
 	// patch the secret
-	if _, err := rm.secretsClient.Patch(resticCreds.Name, types.MergePatchType, patch); err != nil {
-		return errors.Wrap(err, "unable to patch restic-credentials secret")
+	if _, err := rm.secretsGetter.Secrets(name).Patch(resticCreds.Name, types.MergePatchType, patch); err != nil {
+		return errors.Wrapf(err, "unable to patch secret %s", credsSecret)
 	}
 
 	// init the repo
@@ -426,18 +427,18 @@ func (rm *repositoryManager) exec(cmd *Command) ([]byte, error) {
 	// TODO use a SecretLister instead of a client and switch to using restic.TempCredentialsFile func
 
 	// get the encryption key for this repo from the secret
-	secret, err := rm.secretsClient.Get(credsSecret, metav1.GetOptions{})
+	secret, err := rm.secretsGetter.Secrets(cmd.Repo).Get(credsSecret, metav1.GetOptions{})
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 
 	repoKey, found := secret.Data[cmd.Repo]
 	if !found {
-		return nil, errors.Errorf("key %s not found in restic-credentials secret", cmd.Repo)
+		return nil, errors.Errorf("key %s not found in secret %s", cmd.Repo, credsSecret)
 	}
 
 	// write it to a temp file
-	file, err := ioutil.TempFile("", fmt.Sprintf("restic-credentials-%s", cmd.Repo))
+	file, err := ioutil.TempFile("", fmt.Sprintf("%s-%s", credsSecret, cmd.Repo))
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}

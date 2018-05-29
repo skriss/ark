@@ -503,7 +503,7 @@ func (s *server) initRestic(config api.ObjectStorageProviderConfig) error {
 		s.objectStore,
 		config,
 		s.arkClient,
-		s.kubeClient.CoreV1().Secrets(s.namespace),
+		s.kubeClient.CoreV1(),
 		s.logger,
 	)
 

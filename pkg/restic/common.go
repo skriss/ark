@@ -126,18 +126,18 @@ func GetSnapshotsInBackup(backup *arkv1api.Backup, podVolumeBackupLister arkv1li
 
 // TempCredentialsFile creates and returns a temp file containing a restic
 // encryption key for the given repo.
-func TempCredentialsFile(secretLister corev1listers.SecretLister, secretName, secretNamespace, repoName string) (*os.File, error) {
-	secret, err := secretLister.Secrets(secretNamespace).Get(secretName)
+func TempCredentialsFile(secretLister corev1listers.SecretLister, repoName string) (*os.File, error) {
+	secret, err := secretLister.Secrets(repoName).Get(credsSecret)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 
 	repoKey, found := secret.Data[repoName]
 	if !found {
-		return nil, errors.Errorf("key %s not found in restic-credentials secret", repoName)
+		return nil, errors.Errorf("key %s not found in secret %s", repoName, credsSecret)
 	}
 
-	file, err := ioutil.TempFile("", fmt.Sprintf("restic-credentials-%s", repoName))
+	file, err := ioutil.TempFile("", fmt.Sprintf("%s-%s", credsSecret, repoName))
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}

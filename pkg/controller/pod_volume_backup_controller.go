@@ -166,10 +166,8 @@ func (c *podVolumeBackupController) processBackup(req *arkv1api.PodVolumeBackup)
 		return err
 	}
 
-	// TODO creds should move into the pod's namespace
-
 	// temp creds
-	file, err := restic.TempCredentialsFile(c.secretLister, "restic-credentials", req.Namespace, req.Spec.Pod.Namespace)
+	file, err := restic.TempCredentialsFile(c.secretLister, req.Spec.Pod.Namespace)
 	if err != nil {
 		log.WithError(err).Error("Error creating temp restic credentials file")
 		return c.fail(req, errors.Wrap(err, "error creating temp restic credentials file").Error(), log)
