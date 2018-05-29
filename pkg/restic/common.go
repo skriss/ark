@@ -17,7 +17,6 @@ limitations under the License.
 package restic
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -96,17 +95,7 @@ func GetVolumesToBackup(obj metav1.Object) []string {
 		return nil
 	}
 
-	var backups []string
-	// check for json array
-	if backupsValue[0] == '[' {
-		if err := json.Unmarshal([]byte(backupsValue), &backups); err != nil {
-			backups = []string{backupsValue}
-		}
-	} else {
-		backups = append(backups, backupsValue)
-	}
-
-	return backups
+	return strings.Split(backupsValue, ",")
 }
 
 // GetSnapshotsInBackup returns a list of all restic snapshot ids associated with
