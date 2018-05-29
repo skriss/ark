@@ -93,12 +93,56 @@ const (
 
 type repositoryManager struct {
 	objectStore   cloudprovider.ObjectStore
-	bucket        string
+	config        config
 	arkClient     clientset.Interface
 	secretsClient corev1client.SecretInterface
 	log           logrus.FieldLogger
-	repoPrefix    string
 	repoLocker    *repoLocker
+}
+
+type config struct {
+	repoPrefix string
+	bucket     string
+	path       string
+}
+
+func getConfig(objectStorageConfig arkv1api.ObjectStorageProviderConfig) config {
+	var (
+		c     = config{}
+		parts = strings.SplitN(objectStorageConfig.ResticLocation, "/", 2)
+	)
+
+	switch len(parts) {
+	case 0:
+	case 1:
+		c.bucket = parts[0]
+	default:
+		c.bucket = parts[0]
+		c.path = parts[1]
+	}
+
+	switch BackendType(objectStorageConfig.Name) {
+	case AWSBackend:
+		var url string
+		switch {
+		// non-AWS, S3-compatible object store
+		case objectStorageConfig.Config != nil && objectStorageConfig.Config["s3Url"] != "":
+			url = objectStorageConfig.Config["s3Url"]
+		default:
+			url = "s3.amazonaws.com"
+		}
+
+		c.repoPrefix = fmt.Sprintf("s3:%s/%s", url, c.bucket)
+		if c.path != "" {
+			c.repoPrefix += "/" + c.path
+		}
+	case AzureBackend:
+		c.repoPrefix = fmt.Sprintf("azure:%s:/%s", c.bucket, c.path)
+	case GCPBackend:
+		c.repoPrefix = fmt.Sprintf("gs:%s:/%s", c.bucket, c.path)
+	}
+
+	return c
 }
 
 // NewRepositoryManager constructs a RepositoryManager.
@@ -109,32 +153,15 @@ func NewRepositoryManager(
 	secretsClient corev1client.SecretInterface,
 	log logrus.FieldLogger,
 ) RepositoryManager {
-	rm := &repositoryManager{
+	return &repositoryManager{
 		objectStore:   objectStore,
-		bucket:        config.ResticLocation,
+		config:        getConfig(config),
 		arkClient:     arkClient,
 		secretsClient: secretsClient,
 		log:           log,
 		repoLocker:    newRepoLocker(),
 	}
 
-	switch BackendType(config.Name) {
-	case AWSBackend:
-		url := "s3.amazonaws.com"
-
-		// non-AWS, S3-compatible object store
-		if config.Config != nil && config.Config["s3Url"] != "" {
-			url = config.Config["s3Url"]
-		}
-
-		rm.repoPrefix = fmt.Sprintf("s3:%s/%s", url, rm.bucket)
-	case AzureBackend:
-		rm.repoPrefix = "azure:" + rm.bucket + ":"
-	case GCPBackend:
-		rm.repoPrefix = "gs:" + rm.bucket + ":"
-	}
-
-	return rm
 }
 
 func (rm *repositoryManager) BackupPodVolumes(ctx context.Context, backup *arkv1api.Backup, pod *corev1api.Pod, log logrus.FieldLogger) error {
@@ -215,7 +242,7 @@ func (rm *repositoryManager) BackupPodVolumes(ctx context.Context, backup *arkv1
 					"ns":         pod.Namespace,
 					"volume":     volumeName,
 				},
-				RepoPrefix: rm.repoPrefix,
+				RepoPrefix: rm.config.repoPrefix,
 			},
 		}
 
@@ -227,12 +254,12 @@ func (rm *repositoryManager) BackupPodVolumes(ctx context.Context, backup *arkv1
 
 	var errs []error
 
-ForLoop:
+ForEachVolume:
 	for i := 0; i < len(volumesToBackup); i++ {
 		select {
 		case <-ctx.Done():
 			errs = append(errs, errors.New("timed out waiting for all PodVolumeBackups to complete"))
-			break ForLoop
+			break ForEachVolume
 		case res := <-resultChan:
 			switch res.Status.Phase {
 			case arkv1api.PodVolumeBackupPhaseCompleted:
@@ -312,7 +339,7 @@ func (rm *repositoryManager) RestorePodVolumes(ctx context.Context, restore *ark
 				},
 				Volume:     volume,
 				SnapshotID: snapshot,
-				RepoPrefix: rm.repoPrefix,
+				RepoPrefix: rm.config.repoPrefix,
 			},
 		}
 
@@ -324,12 +351,12 @@ func (rm *repositoryManager) RestorePodVolumes(ctx context.Context, restore *ark
 
 	var errs []error
 
-ForLoop:
+ForEachVolume:
 	for i := 0; i < len(volumesToRestore); i++ {
 		select {
 		case <-ctx.Done():
 			errs = append(errs, errors.New("timed out waiting for all PodVolumeRestores to complete"))
-			break ForLoop
+			break ForEachVolume
 		case res := <-resultChan:
 			if res.Status.Phase == arkv1api.PodVolumeRestorePhaseFailed {
 				errs = append(errs, errors.Errorf("pod volume restore failed: %s", res.Status.Message))
@@ -413,7 +440,7 @@ func (rm *repositoryManager) ensureRepo(name string) error {
 	// init the repo
 	cmd := &Command{
 		Command:    "init",
-		RepoPrefix: rm.repoPrefix,
+		RepoPrefix: rm.config.repoPrefix,
 		Repo:       name,
 	}
 
@@ -421,7 +448,7 @@ func (rm *repositoryManager) ensureRepo(name string) error {
 }
 
 func (rm *repositoryManager) getAllRepos() ([]string, error) {
-	prefixes, err := rm.objectStore.ListCommonPrefixes(rm.bucket, "/")
+	prefixes, err := rm.objectStore.ListCommonPrefixes(rm.config.bucket, "/")
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +518,7 @@ func (rm *repositoryManager) CheckRepo(name string) error {
 
 	cmd := &Command{
 		Command:    "check",
-		RepoPrefix: rm.repoPrefix,
+		RepoPrefix: rm.config.repoPrefix,
 		Repo:       name,
 	}
 
@@ -504,7 +531,7 @@ func (rm *repositoryManager) PruneRepo(name string) error {
 
 	cmd := &Command{
 		Command:    "prune",
-		RepoPrefix: rm.repoPrefix,
+		RepoPrefix: rm.config.repoPrefix,
 		Repo:       name,
 	}
 
@@ -517,7 +544,7 @@ func (rm *repositoryManager) Forget(repo, snapshotID string) error {
 
 	cmd := &Command{
 		Command:    "forget",
-		RepoPrefix: rm.repoPrefix,
+		RepoPrefix: rm.config.repoPrefix,
 		Repo:       repo,
 		Args:       []string{snapshotID},
 	}
