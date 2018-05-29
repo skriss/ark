@@ -69,16 +69,16 @@ type kindString string
 
 // kubernetesRestorer implements Restorer for restoring into a Kubernetes cluster.
 type kubernetesRestorer struct {
-	discoveryHelper    discovery.Helper
-	dynamicFactory     client.DynamicFactory
-	backupService      cloudprovider.BackupService
-	snapshotService    cloudprovider.SnapshotService
-	backupClient       arkv1client.BackupsGetter
-	namespaceClient    corev1.NamespaceInterface
-	resticRestorer     restic.Restorer
-	resourcePriorities []string
-	fileSystem         FileSystem
-	logger             logrus.FieldLogger
+	discoveryHelper       discovery.Helper
+	dynamicFactory        client.DynamicFactory
+	backupService         cloudprovider.BackupService
+	snapshotService       cloudprovider.SnapshotService
+	backupClient          arkv1client.BackupsGetter
+	namespaceClient       corev1.NamespaceInterface
+	resticRestorerFactory restic.RestorerFactory
+	resourcePriorities    []string
+	fileSystem            FileSystem
+	logger                logrus.FieldLogger
 }
 
 // prioritizeResources returns an ordered, fully-resolved list of resources to restore based on
@@ -148,20 +148,20 @@ func NewKubernetesRestorer(
 	resourcePriorities []string,
 	backupClient arkv1client.BackupsGetter,
 	namespaceClient corev1.NamespaceInterface,
-	resticRestorer restic.Restorer,
+	resticRestorerFactory restic.RestorerFactory,
 	logger logrus.FieldLogger,
 ) (Restorer, error) {
 	return &kubernetesRestorer{
-		discoveryHelper:    discoveryHelper,
-		dynamicFactory:     dynamicFactory,
-		backupService:      backupService,
-		snapshotService:    snapshotService,
-		backupClient:       backupClient,
-		namespaceClient:    namespaceClient,
-		resticRestorer:     resticRestorer,
-		resourcePriorities: resourcePriorities,
-		fileSystem:         &osFileSystem{},
-		logger:             logger,
+		discoveryHelper:       discoveryHelper,
+		dynamicFactory:        dynamicFactory,
+		backupService:         backupService,
+		snapshotService:       snapshotService,
+		backupClient:          backupClient,
+		namespaceClient:       namespaceClient,
+		resticRestorerFactory: resticRestorerFactory,
+		resourcePriorities:    resourcePriorities,
+		fileSystem:            &osFileSystem{},
+		logger:                logger,
 	}, nil
 }
 
@@ -203,7 +203,15 @@ func (kr *kubernetesRestorer) Restore(restore *api.Restore, backup *api.Backup, 
 		return api.RestoreResult{}, api.RestoreResult{Ark: []string{err.Error()}}
 	}
 
-	ctx := &context{
+	ctx, cancelFunc := go_context.WithTimeout(go_context.Background(), 10*time.Minute)
+	defer cancelFunc()
+
+	resticRestorer, err := kr.resticRestorerFactory.Restorer(ctx, restore)
+	if err != nil {
+		return api.RestoreResult{}, api.RestoreResult{Ark: []string{err.Error()}}
+	}
+
+	restoreCtx := &context{
 		backup:               backup,
 		backupReader:         backupReader,
 		restore:              restore,
@@ -215,10 +223,10 @@ func (kr *kubernetesRestorer) Restore(restore *api.Restore, backup *api.Backup, 
 		namespaceClient:      kr.namespaceClient,
 		actions:              resolvedActions,
 		snapshotService:      kr.snapshotService,
-		resticRestorer:       kr.resticRestorer,
+		resticRestorer:       resticRestorer,
 	}
 
-	return ctx.execute()
+	return restoreCtx.execute()
 }
 
 // getResourceIncludesExcludes takes the lists of resources to include and exclude, uses the

@@ -42,7 +42,6 @@ import (
 	"github.com/heptio/ark/pkg/cloudprovider"
 	clientset "github.com/heptio/ark/pkg/generated/clientset/versioned"
 	arkv1informers "github.com/heptio/ark/pkg/generated/informers/externalversions/ark/v1"
-	"github.com/heptio/ark/pkg/util/boolptr"
 	"github.com/heptio/ark/pkg/util/sync"
 )
 
@@ -67,7 +66,7 @@ type RepositoryManager interface {
 
 	BackupperFactory
 
-	Restorer
+	RestorerFactory
 }
 
 // BackupperFactory can construct restic backuppers.
@@ -77,10 +76,11 @@ type BackupperFactory interface {
 	Backupper(context.Context, *arkv1api.Backup) (Backupper, error)
 }
 
-// Restorer can execute restic restores of volumes in a pod.
-type Restorer interface {
-	// RestorePodVolumes restores all annotated volumes in a pod.
-	RestorePodVolumes(ctx context.Context, restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error
+// RestorerFactory can construct restic restorers.
+type RestorerFactory interface {
+	// Restorer returns a restic restorer for use during a single
+	// Ark restore.
+	Restorer(context.Context, *arkv1api.Restore) (Restorer, error)
 }
 
 type BackendType string
@@ -192,6 +192,7 @@ func (rm *repositoryManager) Backupper(ctx context.Context, backup *arkv1api.Bac
 			},
 		},
 	)
+
 	go b.informer.Run(ctx.Done())
 	if !cache.WaitForCacheSync(ctx.Done(), b.informer.HasSynced) {
 		return nil, errors.New("timed out waiting for cache to sync")
@@ -200,98 +201,40 @@ func (rm *repositoryManager) Backupper(ctx context.Context, backup *arkv1api.Bac
 	return b, nil
 }
 
-func (rm *repositoryManager) RestorePodVolumes(ctx context.Context, restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error {
-	// get volumes to restore from pod's annotations
-	volumesToRestore := GetPodSnapshotAnnotations(pod)
-	if len(volumesToRestore) == 0 {
-		return nil
+func (rm *repositoryManager) Restorer(ctx context.Context, restore *arkv1api.Restore) (Restorer, error) {
+	r := &restorer{
+		repoManager: rm,
+		informer: arkv1informers.NewFilteredPodVolumeRestoreInformer(
+			rm.arkClient,
+			restore.Namespace,
+			0,
+			cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+			func(opts *metav1.ListOptions) {
+				opts.LabelSelector = fmt.Sprintf("%s=%s", arkv1api.RestoreUIDLabel, restore.UID)
+			},
+		),
+		results: make(map[string]chan *arkv1api.PodVolumeRestore),
+		ctx:     ctx,
 	}
 
-	resultChan := make(chan *arkv1api.PodVolumeRestore)
-
-	informer := arkv1informers.NewFilteredPodVolumeRestoreInformer(
-		rm.arkClient,
-		restore.Namespace,
-		0,
-		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
-		func(opts *metav1.ListOptions) {
-			opts.LabelSelector = fmt.Sprintf("%s=%s", arkv1api.RestoreNameLabel, restore.Name)
-		},
-	)
-	informer.AddEventHandler(
+	r.informer.AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			UpdateFunc: func(_, obj interface{}) {
 				pvr := obj.(*arkv1api.PodVolumeRestore)
 
 				if pvr.Status.Phase == arkv1api.PodVolumeRestorePhaseCompleted || pvr.Status.Phase == arkv1api.PodVolumeRestorePhaseFailed {
-					resultChan <- pvr
+					r.results[resultsKey(pvr.Spec.Pod.Namespace, pvr.Spec.Pod.Name)] <- pvr
 				}
 			},
 		},
 	)
-	go informer.Run(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
-		return errors.New("timed out waiting for cache to sync")
+
+	go r.informer.Run(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), r.informer.HasSynced) {
+		return nil, errors.New("timed out waiting for cache to sync")
 	}
 
-	for volume, snapshot := range volumesToRestore {
-		rm.repoLocker.Lock(pod.Namespace, false)
-		defer rm.repoLocker.Unlock(pod.Namespace, false)
-
-		// TODO should we return here, or continue with what we can?
-		volumeRestore := &arkv1api.PodVolumeRestore{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace:    restore.Namespace,
-				GenerateName: restore.Name + "-",
-				OwnerReferences: []metav1.OwnerReference{
-					{
-						APIVersion: arkv1api.SchemeGroupVersion.String(),
-						Kind:       "Restore",
-						Name:       restore.Name,
-						UID:        restore.UID,
-						Controller: boolptr.True(),
-					},
-				},
-				Labels: map[string]string{
-					arkv1api.RestoreNameLabel: restore.Name,
-					arkv1api.RestoreUIDLabel:  string(restore.UID),
-				},
-			},
-			Spec: arkv1api.PodVolumeRestoreSpec{
-				Pod: corev1api.ObjectReference{
-					Kind:      "Pod",
-					Namespace: pod.Namespace,
-					Name:      pod.Name,
-					UID:       pod.UID,
-				},
-				Volume:     volume,
-				SnapshotID: snapshot,
-				RepoPrefix: rm.config.repoPrefix,
-			},
-		}
-
-		// TODO should we return here, or continue with what we can?
-		if err := errorOnly(rm.arkClient.ArkV1().PodVolumeRestores(volumeRestore.Namespace).Create(volumeRestore)); err != nil {
-			return errors.WithStack(err)
-		}
-	}
-
-	var errs []error
-
-ForEachVolume:
-	for i := 0; i < len(volumesToRestore); i++ {
-		select {
-		case <-ctx.Done():
-			errs = append(errs, errors.New("timed out waiting for all PodVolumeRestores to complete"))
-			break ForEachVolume
-		case res := <-resultChan:
-			if res.Status.Phase == arkv1api.PodVolumeRestorePhaseFailed {
-				errs = append(errs, errors.Errorf("pod volume restore failed: %s", res.Status.Message))
-			}
-		}
-	}
-
-	return kerrs.NewAggregate(errs)
+	return r, nil
 }
 
 func (rm *repositoryManager) ensureRepo(name string) error {

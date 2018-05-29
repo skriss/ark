@@ -763,7 +763,7 @@ func newRestorer(
 	resourcePriorities []string,
 	backupClient arkv1client.BackupsGetter,
 	kubeClient kubernetes.Interface,
-	resticRestorer restic.Restorer,
+	resticRestorerFactory restic.RestorerFactory,
 	logger logrus.FieldLogger,
 ) (restore.Restorer, error) {
 	return restore.NewKubernetesRestorer(
@@ -774,7 +774,7 @@ func newRestorer(
 		resourcePriorities,
 		backupClient,
 		kubeClient.CoreV1().Namespaces(),
-		resticRestorer,
+		resticRestorerFactory,
 		logger,
 	)
 }
