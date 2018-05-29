@@ -25,7 +25,6 @@ import (
 
 	corev1api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/cache"
 
 	arkv1api "github.com/heptio/ark/pkg/apis/ark/v1"
@@ -35,7 +34,7 @@ import (
 // Restorer can execute restic restores of volumes in a pod.
 type Restorer interface {
 	// RestorePodVolumes restores all annotated volumes in a pod.
-	RestorePodVolumes(ctx context.Context, restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error
+	RestorePodVolumes(restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) []error
 }
 
 type restorer struct {
@@ -46,7 +45,7 @@ type restorer struct {
 	ctx         context.Context
 }
 
-func (r *restorer) RestorePodVolumes(ctx context.Context, restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) error {
+func (r *restorer) RestorePodVolumes(restore *arkv1api.Restore, pod *corev1api.Pod, log logrus.FieldLogger) []error {
 	// get volumes to restore from pod's annotations
 	volumesToRestore := GetPodSnapshotAnnotations(pod)
 	if len(volumesToRestore) == 0 {
@@ -57,11 +56,15 @@ func (r *restorer) RestorePodVolumes(ctx context.Context, restore *arkv1api.Rest
 	r.results[resultsKey(pod.Namespace, pod.Name)] = make(chan *arkv1api.PodVolumeRestore)
 	r.resultsLock.Unlock()
 
+	var (
+		errs        []error
+		numRestores int
+	)
+
 	for volume, snapshot := range volumesToRestore {
 		r.repoManager.repoLocker.Lock(pod.Namespace, false)
 		defer r.repoManager.repoLocker.Unlock(pod.Namespace, false)
 
-		// TODO should we return here, or continue with what we can?
 		volumeRestore := &arkv1api.PodVolumeRestore{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace:    restore.Namespace,
@@ -93,18 +96,17 @@ func (r *restorer) RestorePodVolumes(ctx context.Context, restore *arkv1api.Rest
 			},
 		}
 
-		// TODO should we return here, or continue with what we can?
 		if err := errorOnly(r.repoManager.arkClient.ArkV1().PodVolumeRestores(volumeRestore.Namespace).Create(volumeRestore)); err != nil {
-			return errors.WithStack(err)
+			errs = append(errs, errors.WithStack(err))
+			continue
 		}
+		numRestores++
 	}
 
-	var errs []error
-
 ForEachVolume:
-	for i := 0; i < len(volumesToRestore); i++ {
+	for i := 0; i < numRestores; i++ {
 		select {
-		case <-ctx.Done():
+		case <-r.ctx.Done():
 			errs = append(errs, errors.New("timed out waiting for all PodVolumeRestores to complete"))
 			break ForEachVolume
 		case res := <-r.results[resultsKey(pod.Namespace, pod.Name)]:
@@ -118,5 +120,5 @@ ForEachVolume:
 	delete(r.results, resultsKey(pod.Namespace, pod.Name))
 	r.resultsLock.Unlock()
 
-	return kerrs.NewAggregate(errs)
+	return errs
 }

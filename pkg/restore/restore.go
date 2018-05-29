@@ -41,6 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	kubeerrs "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -56,6 +57,7 @@ import (
 	"github.com/heptio/ark/pkg/util/collections"
 	"github.com/heptio/ark/pkg/util/kube"
 	"github.com/heptio/ark/pkg/util/logging"
+	arksync "github.com/heptio/ark/pkg/util/sync"
 )
 
 // Restorer knows how to restore a backup.
@@ -303,7 +305,7 @@ type context struct {
 	actions              []resolvedAction
 	snapshotService      cloudprovider.SnapshotService
 	resticRestorer       restic.Restorer
-	globalWaitGroup      sync.WaitGroup
+	globalWaitGroup      arksync.ErrorGroup
 	resourceWaitGroup    sync.WaitGroup
 	resourceWatches      []watch.Interface
 }
@@ -462,8 +464,15 @@ func (ctx *context) restoreFromDir(dir string) (api.RestoreResult, api.RestoreRe
 
 	// TODO timeout?
 	ctx.logger.Debug("Waiting on global wait group")
-	ctx.globalWaitGroup.Wait()
+	waitErrs := ctx.globalWaitGroup.Wait()
 	ctx.logger.Debug("Done waiting on global wait group")
+
+	for _, err := range waitErrs {
+		// TODO not ideal to be adding these to Ark-level errors
+		// rather than a specific namespace, but don't have a way
+		// to track the namespace right now.
+		errs.Ark = append(errs.Ark, err.Error())
+	}
 
 	return warnings, errs
 }
@@ -731,25 +740,20 @@ func (ctx *context) restoreResource(resource, namespace, resourcePath string) (a
 		}
 
 		if groupResource == kuberesource.Pods && len(restic.GetPodSnapshotAnnotations(obj)) > 0 {
-			ctx.globalWaitGroup.Add(1)
-			go func() {
-				defer ctx.globalWaitGroup.Done()
-
+			ctx.globalWaitGroup.GoErrorSlice(func() []error {
 				pod := new(v1.Pod)
 				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(createdObj.UnstructuredContent(), &pod); err != nil {
 					ctx.logger.WithError(err).Error("error converting unstructured pod")
-					return
+					return []error{err}
 				}
 
-				if err := func() error {
-					volumeCtx, cancelFunc := go_context.WithTimeout(go_context.Background(), 10*time.Minute)
-					defer cancelFunc()
-
-					return ctx.resticRestorer.RestorePodVolumes(volumeCtx, ctx.restore, pod, ctx.logger)
-				}(); err != nil {
-					ctx.logger.WithError(err).Error("unable to successfully complete restic restore of pod's volumes")
+				if errs := ctx.resticRestorer.RestorePodVolumes(ctx.restore, pod, ctx.logger); errs != nil {
+					ctx.logger.WithError(kubeerrs.NewAggregate(errs)).Error("unable to successfully complete restic restores of pod's volumes")
+					return errs
 				}
-			}()
+
+				return nil
+			})
 		}
 	}
 

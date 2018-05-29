@@ -40,6 +40,22 @@ func (eg *ErrorGroup) Go(action func() error) {
 	}()
 }
 
+// GoErrorSlice runs a function that returns a slice of errors
+// in a goroutine.
+func (eg *ErrorGroup) GoErrorSlice(action func() []error) {
+	if eg.errChan == nil {
+		eg.errChan = make(chan error)
+	}
+
+	eg.wg.Add(1)
+	go func() {
+		for _, err := range action() {
+			eg.errChan <- err
+		}
+		eg.wg.Done()
+	}()
+}
+
 // Wait waits for all functions run via Go to finish,
 // and returns all of their errors.
 func (eg *ErrorGroup) Wait() []error {
