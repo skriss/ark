@@ -65,7 +65,7 @@ func (a *resticRestoreAction) Execute(obj runtime.Unstructured, restore *api.Res
 	log.Info("Restic snapshot ID annotations found")
 
 	initContainer := corev1.Container{
-		Name:  "restic-wait",
+		Name:  restic.InitContainer,
 		Image: "gcr.io/steve-heptio/restic-init-container:latest",
 		Args:  []string{string(restore.UID)},
 		Env: []corev1.EnvVar{

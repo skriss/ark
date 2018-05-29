@@ -81,6 +81,7 @@ func (r *restorer) RestorePodVolumes(restore *arkv1api.Restore, pod *corev1api.P
 				Labels: map[string]string{
 					arkv1api.RestoreNameLabel: restore.Name,
 					arkv1api.RestoreUIDLabel:  string(restore.UID),
+					arkv1api.PodUIDLabel:      string(pod.UID),
 				},
 			},
 			Spec: arkv1api.PodVolumeRestoreSpec{

@@ -33,6 +33,8 @@ import (
 )
 
 const (
+	InitContainer = "restic-wait"
+
 	podAnnotationPrefix       = "snapshot.ark.heptio.com/"
 	volumesToBackupAnnotation = "backup.ark.heptio.com/backup-volumes"
 )

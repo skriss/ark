@@ -28,4 +28,7 @@ const (
 
 	// RestoreUIDLabel is the label key used to identify a restore by uid.
 	RestoreUIDLabel = "ark.heptio.com/restore-uid"
+
+	// PodUIDLabel is the label key used to identify a pod by uid.
+	PodUIDLabel = "ark.heptio.com/pod-uid"
 )

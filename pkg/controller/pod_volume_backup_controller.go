@@ -60,8 +60,8 @@ func NewPodVolumeBackupController(
 	logger logrus.FieldLogger,
 	podVolumeBackupInformer informers.PodVolumeBackupInformer,
 	podVolumeBackupClient arkv1client.PodVolumeBackupsGetter,
+	podInformer cache.SharedIndexInformer,
 	secretInformer corev1informers.SecretInformer,
-	podInformer corev1informers.PodInformer,
 	pvcInformer corev1informers.PersistentVolumeClaimInformer,
 	nodeName string,
 ) Interface {
@@ -69,8 +69,8 @@ func NewPodVolumeBackupController(
 		genericController:     newGenericController("pod-volume-backup", logger),
 		podVolumeBackupClient: podVolumeBackupClient,
 		podVolumeBackupLister: podVolumeBackupInformer.Lister(),
+		podLister:             corev1listers.NewPodLister(podInformer.GetIndexer()),
 		secretLister:          secretInformer.Lister(),
-		podLister:             podInformer.Lister(),
 		pvcLister:             pvcInformer.Lister(),
 		nodeName:              nodeName,
 	}
@@ -80,7 +80,7 @@ func NewPodVolumeBackupController(
 		c.cacheSyncWaiters,
 		podVolumeBackupInformer.Informer().HasSynced,
 		secretInformer.Informer().HasSynced,
-		podInformer.Informer().HasSynced,
+		podInformer.HasSynced,
 		pvcInformer.Informer().HasSynced,
 	)
 	c.processBackupFunc = c.processBackup
