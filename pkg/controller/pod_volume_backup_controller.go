@@ -172,14 +172,13 @@ func (c *podVolumeBackupController) processBackup(req *arkv1api.PodVolumeBackup)
 		log.WithError(err).Error("Error creating temp restic credentials file")
 		return c.fail(req, errors.Wrap(err, "error creating temp restic credentials file").Error(), log)
 	}
-
-	defer file.Close()
-	defer os.Remove(file.Name())
+	// ignore error since there's nothing we can do and it's a temp file.
+	defer os.Remove(file)
 
 	resticCmd := restic.BackupCommand(
 		req.Spec.RepoPrefix,
 		req.Spec.Pod.Namespace,
-		file.Name(),
+		file,
 		path,
 		req.Spec.Tags,
 	)
@@ -197,7 +196,7 @@ func (c *podVolumeBackupController) processBackup(req *arkv1api.PodVolumeBackup)
 		return c.fail(req, fmt.Sprintf("error running restic backup, stderr=%s: %s", stderr, err.Error()), log)
 	}
 
-	snapshotID, err := restic.GetSnapshotID(req.Spec.RepoPrefix, req.Spec.Pod.Namespace, file.Name(), req.Spec.Tags)
+	snapshotID, err := restic.GetSnapshotID(req.Spec.RepoPrefix, req.Spec.Pod.Namespace, file, req.Spec.Tags)
 	if err != nil {
 		log.WithError(err).Error("Error getting SnapshotID")
 		return c.fail(req, errors.Wrap(err, "error getting snapshot id").Error(), log)

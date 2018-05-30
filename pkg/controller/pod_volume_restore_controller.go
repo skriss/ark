@@ -276,14 +276,13 @@ func (c *podVolumeRestoreController) processRestore(req *arkv1api.PodVolumeResto
 		log.WithError(err).Error("Error creating temp restic credentials file")
 		return c.fail(req, errors.Wrap(err, "error creating temp restic credentials file").Error(), log)
 	}
-
-	defer file.Close()
-	defer os.Remove(file.Name())
+	// ignore error since there's nothing we can do and it's a temp file.
+	defer os.Remove(file)
 
 	resticCmd := restic.RestoreCommand(
 		req.Spec.RepoPrefix,
 		req.Spec.Pod.Namespace,
-		file.Name(),
+		file,
 		string(req.Spec.Pod.UID),
 		req.Spec.SnapshotID,
 	)

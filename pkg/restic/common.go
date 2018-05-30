@@ -19,7 +19,6 @@ package restic
 import (
 	"fmt"
 	"io/ioutil"
-	"os"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -124,27 +123,38 @@ func GetSnapshotsInBackup(backup *arkv1api.Backup, podVolumeBackupLister arkv1li
 	return res, nil
 }
 
-// TempCredentialsFile creates and returns a temp file containing a restic
-// encryption key for the given repo.
-func TempCredentialsFile(secretLister corev1listers.SecretLister, repoName string) (*os.File, error) {
+// TempCredentialsFile creates a temp file containing a restic
+// encryption key for the given repo and returns its path. The
+// caller should generally call os.Remove() to remove the file
+// when done with it.
+func TempCredentialsFile(secretLister corev1listers.SecretLister, repoName string) (string, error) {
 	secret, err := secretLister.Secrets(repoName).Get(CredsSecret)
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return "", errors.WithStack(err)
 	}
 
 	repoKey, found := secret.Data[repoName]
 	if !found {
-		return nil, errors.Errorf("key %s not found in secret %s", repoName, CredsSecret)
+		return "", errors.Errorf("key %s not found in secret %s", repoName, CredsSecret)
 	}
 
 	file, err := ioutil.TempFile("", fmt.Sprintf("%s-%s", CredsSecret, repoName))
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return "", errors.WithStack(err)
 	}
 
 	if _, err := file.Write(repoKey); err != nil {
-		return nil, errors.WithStack(err)
+		// nothing we can do about an error closing the file here, and we're
+		// already returning an error about the write failing.
+		file.Close()
+		return "", errors.WithStack(err)
 	}
 
-	return file, nil
+	name := file.Name()
+
+	if err := file.Close(); err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	return name, nil
 }

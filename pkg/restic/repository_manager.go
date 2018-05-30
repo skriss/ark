@@ -439,12 +439,10 @@ func (rm *repositoryManager) exec(cmd *Command) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		file.Close()
-		os.Remove(file.Name())
-	}()
+	// ignore error since there's nothing we can do and it's a temp file.
+	defer os.Remove(file)
 
-	cmd.PasswordFile = file.Name()
+	cmd.PasswordFile = file
 
 	output, err := cmd.Cmd().Output()
 	rm.log.WithField("repository", cmd.Repo).Debugf("Ran restic command=%q, output=%s", cmd.String(), output)
