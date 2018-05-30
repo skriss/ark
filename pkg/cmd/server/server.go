@@ -43,6 +43,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	corev1informers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	kcorev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
@@ -513,13 +514,30 @@ func (s *server) initRestic(config api.ObjectStorageProviderConfig) error {
 		os.Setenv("AZURE_ACCOUNT_KEY", os.Getenv("AZURE_STORAGE_KEY"))
 	}
 
-	s.resticManager = restic.NewRepositoryManager(
+	secretsInformer := corev1informers.NewFilteredSecretInformer(
+		s.kubeClient,
+		"",
+		0,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
+		func(opts *metav1.ListOptions) {
+			opts.FieldSelector = fmt.Sprintf("metadata.name=%s", restic.CredsSecret)
+		},
+	)
+	go secretsInformer.Run(s.ctx.Done())
+
+	res, err := restic.NewRepositoryManager(
+		s.ctx,
 		s.objectStore,
 		config,
 		s.arkClient,
+		secretsInformer,
 		s.kubeClient.CoreV1(),
 		s.logger,
 	)
+	if err != nil {
+		return err
+	}
+	s.resticManager = res
 
 	s.logger.Info("Checking restic repositories")
 	return s.resticManager.CheckAllRepos()

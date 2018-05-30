@@ -21,7 +21,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
@@ -36,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kerrs "k8s.io/apimachinery/pkg/util/errors"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
 	arkv1api "github.com/heptio/ark/pkg/apis/ark/v1"
@@ -90,14 +90,15 @@ const (
 	AzureBackend BackendType = "azure"
 	GCPBackend   BackendType = "gcp"
 
-	credsSecret = "restic-credentials"
+	CredsSecret = "restic-credentials"
 )
 
 type repositoryManager struct {
 	objectStore   cloudprovider.ObjectStore
 	config        config
 	arkClient     clientset.Interface
-	secretsGetter corev1client.SecretsGetter
+	secretsLister corev1listers.SecretLister
+	secretsClient corev1client.SecretsGetter
 	log           logrus.FieldLogger
 	repoLocker    *repoLocker
 }
@@ -149,20 +150,29 @@ func getConfig(objectStorageConfig arkv1api.ObjectStorageProviderConfig) config 
 
 // NewRepositoryManager constructs a RepositoryManager.
 func NewRepositoryManager(
+	ctx context.Context,
 	objectStore cloudprovider.ObjectStore,
 	config arkv1api.ObjectStorageProviderConfig,
 	arkClient clientset.Interface,
-	secretsGetter corev1client.SecretsGetter,
+	secretsInformer cache.SharedIndexInformer,
+	secretsClient corev1client.SecretsGetter,
 	log logrus.FieldLogger,
-) RepositoryManager {
-	return &repositoryManager{
+) (RepositoryManager, error) {
+	rm := &repositoryManager{
 		objectStore:   objectStore,
 		config:        getConfig(config),
 		arkClient:     arkClient,
-		secretsGetter: secretsGetter,
+		secretsLister: corev1listers.NewSecretLister(secretsInformer.GetIndexer()),
+		secretsClient: secretsClient,
 		log:           log,
 		repoLocker:    newRepoLocker(),
 	}
+
+	if !cache.WaitForCacheSync(ctx.Done(), secretsInformer.HasSynced) {
+		return nil, errors.New("timed out waiting for cache to sync")
+	}
+
+	return rm, nil
 }
 
 func (rm *repositoryManager) Backupper(ctx context.Context, backup *arkv1api.Backup) (Backupper, error) {
@@ -252,16 +262,16 @@ func (rm *repositoryManager) ensureRepo(name string) error {
 	rm.repoLocker.Lock(name, true)
 	defer rm.repoLocker.Unlock(name, true)
 
-	resticCreds, err := rm.secretsGetter.Secrets(name).Get(credsSecret, metav1.GetOptions{})
+	resticCreds, err := rm.secretsLister.Secrets(name).Get(CredsSecret)
 	if apierrors.IsNotFound(err) {
 		secret := &corev1api.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: name,
-				Name:      credsSecret,
+				Name:      CredsSecret,
 			},
 			Type: corev1api.SecretTypeOpaque,
 		}
-		if resticCreds, err = rm.secretsGetter.Secrets(name).Create(secret); err != nil {
+		if resticCreds, err = rm.secretsClient.Secrets(name).Create(secret); err != nil {
 			return errors.WithStack(err)
 		}
 	} else if err != nil {
@@ -270,7 +280,7 @@ func (rm *repositoryManager) ensureRepo(name string) error {
 
 	// do we already have a key for this repo? we shouldn't
 	if _, exists := resticCreds.Data[name]; exists {
-		return errors.Errorf("secret %s already contains an encryption key for this repo", credsSecret)
+		return errors.Errorf("secret %s already contains an encryption key for this repo", CredsSecret)
 	}
 
 	// generate an encryption key for the repo
@@ -304,8 +314,8 @@ func (rm *repositoryManager) ensureRepo(name string) error {
 	}
 
 	// patch the secret
-	if _, err := rm.secretsGetter.Secrets(name).Patch(resticCreds.Name, types.MergePatchType, patch); err != nil {
-		return errors.Wrapf(err, "unable to patch secret %s", credsSecret)
+	if _, err := rm.secretsClient.Secrets(name).Patch(resticCreds.Name, types.MergePatchType, patch); err != nil {
+		return errors.Wrapf(err, "unable to patch secret %s", CredsSecret)
 	}
 
 	// init the repo
@@ -319,6 +329,7 @@ func (rm *repositoryManager) ensureRepo(name string) error {
 }
 
 func (rm *repositoryManager) getAllRepos() ([]string, error) {
+	// TODO support rm.config.path
 	prefixes, err := rm.objectStore.ListCommonPrefixes(rm.config.bucket, "/")
 	if err != nil {
 		return nil, err
@@ -424,35 +435,15 @@ func (rm *repositoryManager) Forget(repo, snapshotID string) error {
 }
 
 func (rm *repositoryManager) exec(cmd *Command) ([]byte, error) {
-	// TODO use a SecretLister instead of a client and switch to using restic.TempCredentialsFile func
-
-	// get the encryption key for this repo from the secret
-	secret, err := rm.secretsGetter.Secrets(cmd.Repo).Get(credsSecret, metav1.GetOptions{})
+	file, err := TempCredentialsFile(rm.secretsLister, cmd.Repo)
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return nil, err
 	}
-
-	repoKey, found := secret.Data[cmd.Repo]
-	if !found {
-		return nil, errors.Errorf("key %s not found in secret %s", cmd.Repo, credsSecret)
-	}
-
-	// write it to a temp file
-	file, err := ioutil.TempFile("", fmt.Sprintf("%s-%s", credsSecret, cmd.Repo))
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
 	defer func() {
 		file.Close()
 		os.Remove(file.Name())
 	}()
 
-	if _, err := file.Write(repoKey); err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	// use the temp creds file for running the command
 	cmd.PasswordFile = file.Name()
 
 	output, err := cmd.Cmd().Output()
