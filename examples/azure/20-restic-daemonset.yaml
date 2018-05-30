@@ -16,16 +16,16 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata: 
-  name: restic-daemon
+  name: restic
   namespace: heptio-ark
 spec:
   selector:
     matchLabels:
-      name: restic-daemon
+      name: restic
   template:
     metadata:
       labels:
-        name: restic-daemon
+        name: restic
     spec:
       serviceAccountName: ark
       volumes:

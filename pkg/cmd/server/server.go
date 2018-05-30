@@ -262,7 +262,7 @@ func (s *server) run() error {
 		s.runResticMaintenance()
 
 		// warn if restic daemonset does not exist
-		_, err := s.kubeClient.AppsV1().DaemonSets(s.namespace).Get("restic-daemon", metav1.GetOptions{})
+		_, err := s.kubeClient.AppsV1().DaemonSets(s.namespace).Get("restic", metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			s.logger.Warn("Ark restic DaemonSet not found; restic backups will fail until it's created")
 		} else if err != nil {
