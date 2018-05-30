@@ -340,6 +340,15 @@ const (
 	defaultPodVolumeOperationTimeout = 60 * time.Minute
 )
 
+// - Namespaces go first because all namespaced resources depend on them.
+// - PVs go before PVCs because PVCs depend on them.
+// - PVCs go before pods or controllers so they can be mounted as volumes.
+// - Secrets and config maps go before pods or controllers so they can be mounted
+// 	 as volumes.
+// - Service accounts go before pods or controllers so pods can use them.
+// - Limit ranges go before pods or controllers so pods can use them.
+// - Pods go before controllers so they can be explicitly restored and potentially
+//	 have restic restores run before controllers adopt the pods.
 var defaultResourcePriorities = []string{
 	"namespaces",
 	"persistentvolumes",
