@@ -334,9 +334,10 @@ func (s *server) loadConfig() (*api.Config, error) {
 }
 
 const (
-	defaultGCSyncPeriod       = 60 * time.Minute
-	defaultBackupSyncPeriod   = 60 * time.Minute
-	defaultScheduleSyncPeriod = time.Minute
+	defaultGCSyncPeriod              = 60 * time.Minute
+	defaultBackupSyncPeriod          = 60 * time.Minute
+	defaultScheduleSyncPeriod        = time.Minute
+	defaultPodVolumeOperationTimeout = 60 * time.Minute
 )
 
 var defaultResourcePriorities = []string{
@@ -361,6 +362,10 @@ func applyConfigDefaults(c *api.Config, logger logrus.FieldLogger) {
 
 	if c.ScheduleSyncPeriod.Duration == 0 {
 		c.ScheduleSyncPeriod.Duration = defaultScheduleSyncPeriod
+	}
+
+	if c.PodVolumeOperationTimeout.Duration == 0 {
+		c.PodVolumeOperationTimeout.Duration = defaultPodVolumeOperationTimeout
 	}
 
 	if len(c.ResourcePriorities) == 0 {
@@ -567,6 +572,7 @@ func (s *server) runControllers(config *api.Config) error {
 			s.kubeClientConfig,
 			s.kubeClient.CoreV1(),
 			s.resticManager,
+			config.PodVolumeOperationTimeout.Duration,
 		)
 		cmd.CheckError(err)
 
@@ -644,6 +650,7 @@ func (s *server) runControllers(config *api.Config) error {
 		s.arkClient.ArkV1(),
 		s.kubeClient,
 		s.resticManager,
+		config.PodVolumeOperationTimeout.Duration,
 		s.logger,
 	)
 	cmd.CheckError(err)
@@ -745,6 +752,7 @@ func newBackupper(
 	kubeClientConfig *rest.Config,
 	kubeCoreV1Client kcorev1client.CoreV1Interface,
 	resticBackupperFactory restic.BackupperFactory,
+	resticTimeout time.Duration,
 ) (backup.Backupper, error) {
 	return backup.NewKubernetesBackupper(
 		discoveryHelper,
@@ -752,6 +760,7 @@ func newBackupper(
 		podexec.NewPodCommandExecutor(kubeClientConfig, kubeCoreV1Client.RESTClient()),
 		snapshotService,
 		resticBackupperFactory,
+		resticTimeout,
 	)
 }
 
@@ -764,6 +773,7 @@ func newRestorer(
 	backupClient arkv1client.BackupsGetter,
 	kubeClient kubernetes.Interface,
 	resticRestorerFactory restic.RestorerFactory,
+	resticTimeout time.Duration,
 	logger logrus.FieldLogger,
 ) (restore.Restorer, error) {
 	return restore.NewKubernetesRestorer(
@@ -775,6 +785,7 @@ func newRestorer(
 		backupClient,
 		kubeClient.CoreV1().Namespaces(),
 		resticRestorerFactory,
+		resticTimeout,
 		logger,
 	)
 }

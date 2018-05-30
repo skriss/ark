@@ -58,6 +58,7 @@ type kubernetesBackupper struct {
 	groupBackupperFactory  groupBackupperFactory
 	snapshotService        cloudprovider.SnapshotService
 	resticBackupperFactory restic.BackupperFactory
+	resticTimeout          time.Duration
 }
 
 type itemKey struct {
@@ -95,6 +96,7 @@ func NewKubernetesBackupper(
 	podCommandExecutor podexec.PodCommandExecutor,
 	snapshotService cloudprovider.SnapshotService,
 	resticBackupperFactory restic.BackupperFactory,
+	resticTimeout time.Duration,
 ) (Backupper, error) {
 	return &kubernetesBackupper{
 		discoveryHelper:        discoveryHelper,
@@ -103,6 +105,7 @@ func NewKubernetesBackupper(
 		groupBackupperFactory:  &defaultGroupBackupperFactory{},
 		snapshotService:        snapshotService,
 		resticBackupperFactory: resticBackupperFactory,
+		resticTimeout:          resticTimeout,
 	}, nil
 }
 
@@ -247,7 +250,17 @@ func (kb *kubernetesBackupper) Backup(backup *api.Backup, backupFile, logFile io
 		return err
 	}
 
-	ctx, cancelFunc := context.WithTimeout(context.Background(), 10*time.Minute)
+	podVolumeTimeout := kb.resticTimeout
+	if val := backup.Annotations[api.PodVolumeOperationTimeoutAnnotation]; val != "" {
+		parsed, err := time.ParseDuration(val)
+		if err != nil {
+			log.WithError(errors.WithStack(err)).Errorf("Unable to parse pod volume timeout annotation %s, using server value.", val)
+		} else {
+			podVolumeTimeout = parsed
+		}
+	}
+
+	ctx, cancelFunc := context.WithTimeout(context.Background(), podVolumeTimeout)
 	defer cancelFunc()
 
 	resticBackupper, err := kb.resticBackupperFactory.Backupper(ctx, backup)

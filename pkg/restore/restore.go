@@ -78,6 +78,7 @@ type kubernetesRestorer struct {
 	backupClient          arkv1client.BackupsGetter
 	namespaceClient       corev1.NamespaceInterface
 	resticRestorerFactory restic.RestorerFactory
+	resticTimeout         time.Duration
 	resourcePriorities    []string
 	fileSystem            FileSystem
 	logger                logrus.FieldLogger
@@ -151,6 +152,7 @@ func NewKubernetesRestorer(
 	backupClient arkv1client.BackupsGetter,
 	namespaceClient corev1.NamespaceInterface,
 	resticRestorerFactory restic.RestorerFactory,
+	resticTimeout time.Duration,
 	logger logrus.FieldLogger,
 ) (Restorer, error) {
 	return &kubernetesRestorer{
@@ -161,6 +163,7 @@ func NewKubernetesRestorer(
 		backupClient:          backupClient,
 		namespaceClient:       namespaceClient,
 		resticRestorerFactory: resticRestorerFactory,
+		resticTimeout:         resticTimeout,
 		resourcePriorities:    resourcePriorities,
 		fileSystem:            &osFileSystem{},
 		logger:                logger,
@@ -205,7 +208,17 @@ func (kr *kubernetesRestorer) Restore(restore *api.Restore, backup *api.Backup, 
 		return api.RestoreResult{}, api.RestoreResult{Ark: []string{err.Error()}}
 	}
 
-	ctx, cancelFunc := go_context.WithTimeout(go_context.Background(), 10*time.Minute)
+	podVolumeTimeout := kr.resticTimeout
+	if val := restore.Annotations[api.PodVolumeOperationTimeoutAnnotation]; val != "" {
+		parsed, err := time.ParseDuration(val)
+		if err != nil {
+			log.WithError(errors.WithStack(err)).Errorf("Unable to parse pod volume timeout annotation %s, using server value.", val)
+		} else {
+			podVolumeTimeout = parsed
+		}
+	}
+
+	ctx, cancelFunc := go_context.WithTimeout(go_context.Background(), podVolumeTimeout)
 	defer cancelFunc()
 
 	resticRestorer, err := kr.resticRestorerFactory.Restorer(ctx, restore)

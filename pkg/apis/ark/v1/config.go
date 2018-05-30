@@ -58,6 +58,10 @@ type Config struct {
 	// new backups that should be triggered based on schedules.
 	ScheduleSyncPeriod metav1.Duration `json:"scheduleSyncPeriod"`
 
+	// PodVolumeOperationTimeout is how long backups/restores of pod volumes (i.e.
+	// using restic) should be allowed to run before timing out.
+	PodVolumeOperationTimeout metav1.Duration `json:"podVolumeOperationTimeout"`
+
 	// ResourcePriorities is an ordered slice of resources specifying the desired
 	// order of resource restores. Any resources not in the list will be restored
 	// alphabetically after the prioritized resources.

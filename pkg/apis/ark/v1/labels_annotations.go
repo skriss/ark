@@ -31,4 +31,9 @@ const (
 
 	// PodUIDLabel is the label key used to identify a pod by uid.
 	PodUIDLabel = "ark.heptio.com/pod-uid"
+
+	// PodVolumeOperationTimeoutAnnotation is the annotation key used to apply
+	// a backup/restore-specific timeout value for pod volume operations (i.e.
+	// restic backups/restores).
+	PodVolumeOperationTimeoutAnnotation = "ark.heptio.com/pod-volume-timeout"
 )
