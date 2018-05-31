@@ -22,6 +22,6 @@ ADD /bin/linux/amd64/ark /ark
 
 ADD /restic /restic
 
-USER nobody:nobody
+ADD /complete-restore.sh /complete-restore.sh
 
 ENTRYPOINT ["/ark"]
