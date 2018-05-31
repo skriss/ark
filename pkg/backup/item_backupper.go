@@ -191,28 +191,32 @@ func (ib *defaultItemBackupper) backupItem(logger logrus.FieldLogger, obj runtim
 	}
 
 	if groupResource == kuberesource.Pods && len(restic.GetVolumesToBackup(metadata)) > 0 {
-		pod := new(corev1api.Pod)
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), pod); err != nil {
-			return errors.WithStack(err)
-		}
-
-		volumeSnapshots, errs := ib.resticBackupper.BackupPodVolumes(ib.backup, pod, log)
-		if len(errs) > 0 {
-			backupErrs = append(backupErrs, errs...)
-		}
-
-		if len(volumeSnapshots) > 0 {
-			// annotate the pod with the successful volume snapshots
-			for volume, snapshot := range volumeSnapshots {
-				restic.SetPodSnapshotAnnotation(pod, volume, snapshot)
-			}
-
-			// update obj to reflect the annotations
-			unstructuredObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod)
-			if err != nil {
+		if ib.resticBackupper == nil {
+			log.Warn("No restic backupper, not backing up pod's volumes")
+		} else {
+			pod := new(corev1api.Pod)
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.UnstructuredContent(), pod); err != nil {
 				return errors.WithStack(err)
 			}
-			obj = &unstructured.Unstructured{Object: unstructuredObj}
+
+			volumeSnapshots, errs := ib.resticBackupper.BackupPodVolumes(ib.backup, pod, log)
+			if len(errs) > 0 {
+				backupErrs = append(backupErrs, errs...)
+			}
+
+			if len(volumeSnapshots) > 0 {
+				// annotate the pod with the successful volume snapshots
+				for volume, snapshot := range volumeSnapshots {
+					restic.SetPodSnapshotAnnotation(pod, volume, snapshot)
+				}
+
+				// update obj to reflect the annotations
+				unstructuredObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod)
+				if err != nil {
+					return errors.WithStack(err)
+				}
+				obj = &unstructured.Unstructured{Object: unstructuredObj}
+			}
 		}
 	}
 

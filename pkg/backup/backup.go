@@ -263,9 +263,12 @@ func (kb *kubernetesBackupper) Backup(backup *api.Backup, backupFile, logFile io
 	ctx, cancelFunc := context.WithTimeout(context.Background(), podVolumeTimeout)
 	defer cancelFunc()
 
-	resticBackupper, err := kb.resticBackupperFactory.Backupper(ctx, backup)
-	if err != nil {
-		return errors.WithStack(err)
+	var resticBackupper restic.Backupper
+	if kb.resticBackupperFactory != nil {
+		resticBackupper, err = kb.resticBackupperFactory.Backupper(ctx, backup)
+		if err != nil {
+			return errors.WithStack(err)
+		}
 	}
 
 	gb := kb.groupBackupperFactory.newGroupBackupper(
