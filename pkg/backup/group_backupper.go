@@ -131,7 +131,6 @@ func (gb *defaultGroupBackupper) backupGroup(group *metav1.APIResourceList) erro
 			gb.resourceHooks,
 			gb.snapshotService,
 			gb.resticBackupper,
-			gb.resourceBackupperFactory,
 		)
 	)
 

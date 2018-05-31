@@ -53,7 +53,6 @@ type resourceBackupperFactory interface {
 		resourceHooks []resourceHook,
 		snapshotService cloudprovider.SnapshotService,
 		resticBackupper restic.Backupper,
-		resourceBackupperFactory resourceBackupperFactory,
 	) resourceBackupper
 }
 
@@ -74,7 +73,6 @@ func (f *defaultResourceBackupperFactory) newResourceBackupper(
 	resourceHooks []resourceHook,
 	snapshotService cloudprovider.SnapshotService,
 	resticBackupper restic.Backupper,
-	resourceBackupperFactory resourceBackupperFactory,
 ) resourceBackupper {
 	return &defaultResourceBackupper{
 		log:                   log,
