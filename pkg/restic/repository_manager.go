@@ -18,21 +18,15 @@ package restic
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
-	"github.com/evanphx/json-patch"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	corev1api "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	kerrs "k8s.io/apimachinery/pkg/util/errors"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	corev1listers "k8s.io/client-go/listers/core/v1"
@@ -89,8 +83,6 @@ const (
 	AWSBackend   BackendType = "aws"
 	AzureBackend BackendType = "azure"
 	GCPBackend   BackendType = "gcp"
-
-	CredsSecret = "restic-credentials"
 )
 
 type repositoryManager struct {
@@ -261,62 +253,6 @@ func (rm *repositoryManager) ensureRepo(name string) error {
 
 	rm.repoLocker.Lock(name, true)
 	defer rm.repoLocker.Unlock(name, true)
-
-	resticCreds, err := rm.secretsLister.Secrets(name).Get(CredsSecret)
-	if apierrors.IsNotFound(err) {
-		secret := &corev1api.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: name,
-				Name:      CredsSecret,
-			},
-			Type: corev1api.SecretTypeOpaque,
-		}
-		if resticCreds, err = rm.secretsClient.Secrets(name).Create(secret); err != nil {
-			return errors.WithStack(err)
-		}
-	} else if err != nil {
-		return errors.WithStack(err)
-	}
-
-	// do we already have a key for this repo? we shouldn't
-	if _, exists := resticCreds.Data[name]; exists {
-		return errors.Errorf("secret %s already contains an encryption key for this repo", CredsSecret)
-	}
-
-	// generate an encryption key for the repo
-	key := make([]byte, 256)
-	if _, err := rand.Read(key); err != nil {
-		return errors.Wrap(err, "unable to generate encryption key")
-	}
-
-	// capture current state for patch generation
-	preBytes, err := json.Marshal(resticCreds)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	if resticCreds.Data == nil {
-		resticCreds.Data = make(map[string][]byte)
-	}
-
-	// TODO dev code only
-	resticCreds.Data[name] = []byte("passw0rd")
-
-	// get the modified state and generate a patch
-	postBytes, err := json.Marshal(resticCreds)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	patch, err := jsonpatch.CreateMergePatch(preBytes, postBytes)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	// patch the secret
-	if _, err := rm.secretsClient.Secrets(name).Patch(resticCreds.Name, types.MergePatchType, patch); err != nil {
-		return errors.Wrapf(err, "unable to patch secret %s", CredsSecret)
-	}
 
 	// init the repo
 	cmd := &Command{

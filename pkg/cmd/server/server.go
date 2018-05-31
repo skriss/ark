@@ -520,7 +520,7 @@ func (s *server) initRestic(config api.ObjectStorageProviderConfig) error {
 		0,
 		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc},
 		func(opts *metav1.ListOptions) {
-			opts.FieldSelector = fmt.Sprintf("metadata.name=%s", restic.CredsSecret)
+			opts.FieldSelector = fmt.Sprintf("metadata.name=%s", restic.CredentialsSecretName)
 		},
 	)
 	go secretsInformer.Run(s.ctx.Done())

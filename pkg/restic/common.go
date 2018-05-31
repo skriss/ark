@@ -128,17 +128,13 @@ func GetSnapshotsInBackup(backup *arkv1api.Backup, podVolumeBackupLister arkv1li
 // caller should generally call os.Remove() to remove the file
 // when done with it.
 func TempCredentialsFile(secretLister corev1listers.SecretLister, repoName string) (string, error) {
-	secret, err := secretLister.Secrets(repoName).Get(CredsSecret)
+	secretGetter := NewListerSecretGetter(secretLister)
+	repoKey, err := GetRepositoryKey(secretGetter, repoName)
 	if err != nil {
-		return "", errors.WithStack(err)
+		return "", err
 	}
 
-	repoKey, found := secret.Data[repoName]
-	if !found {
-		return "", errors.Errorf("key %s not found in secret %s", repoName, CredsSecret)
-	}
-
-	file, err := ioutil.TempFile("", fmt.Sprintf("%s-%s", CredsSecret, repoName))
+	file, err := ioutil.TempFile("", fmt.Sprintf("%s-%s", CredentialsSecretName, repoName))
 	if err != nil {
 		return "", errors.WithStack(err)
 	}
