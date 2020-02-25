@@ -565,7 +565,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 		}
 	}
 
-	backupTracker := controller.NewBackupTracker()
+	backupTracker := backup.NewTracker()
 
 	backupControllerRunInfo := func() controllerRunInfo {
 		backupper, err := backup.NewKubernetesBackupper(
