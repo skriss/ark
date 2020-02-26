@@ -27,7 +27,6 @@ import (
 
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/backup"
-	velerov1client "github.com/vmware-tanzu/velero/pkg/generated/clientset/versioned/typed/velero/v1"
 	velerov1informers "github.com/vmware-tanzu/velero/pkg/generated/informers/externalversions/velero/v1"
 	velerov1listers "github.com/vmware-tanzu/velero/pkg/generated/listers/velero/v1"
 	"github.com/vmware-tanzu/velero/pkg/metrics"
@@ -39,7 +38,6 @@ type backupController struct {
 
 	backupProcessor *backup.Processor
 	lister          velerov1listers.BackupLister
-	client          velerov1client.BackupsGetter
 	backupTracker   backup.Tracker
 	metrics         *metrics.ServerMetrics
 }
