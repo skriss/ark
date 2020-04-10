@@ -55,7 +55,6 @@ type kubernetesBackupper struct {
 	dynamicFactory         client.DynamicFactory
 	discoveryHelper        discovery.Helper
 	podCommandExecutor     podexec.PodCommandExecutor
-	groupBackupperFactory  groupBackupperFactory
 	resticBackupperFactory restic.BackupperFactory
 	resticTimeout          time.Duration
 }
@@ -94,7 +93,6 @@ func NewKubernetesBackupper(
 		discoveryHelper:        discoveryHelper,
 		dynamicFactory:         dynamicFactory,
 		podCommandExecutor:     podCommandExecutor,
-		groupBackupperFactory:  &defaultGroupBackupperFactory{},
 		resticBackupperFactory: resticBackupperFactory,
 		resticTimeout:          resticTimeout,
 	}, nil
@@ -257,24 +255,35 @@ func (kb *kubernetesBackupper) Backup(log logrus.FieldLogger, backupRequest *Req
 		}
 	}
 
-	gb := kb.groupBackupperFactory.newGroupBackupper(
-		log,
-		backupRequest,
-		kb.dynamicFactory,
-		kb.discoveryHelper,
-		cohabitatingResources(),
-		kb.podCommandExecutor,
-		tw,
-		resticBackupper,
-		newPVCSnapshotTracker(),
-		volumeSnapshotterGetter,
-	)
-
-	for _, group := range kb.discoveryHelper.Resources() {
-		if err := gb.backupGroup(group); err != nil {
-			log.WithError(err).WithField("apiGroup", group.String()).Error("Error backing up API group")
-		}
+	resourceCollector := &resourceCollector{
+		log:                   log,
+		discoveryHelper:       kb.discoveryHelper,
+		backupRequest:         backupRequest,
+		cohabitatingResources: cohabitatingResources(),
+		dynamicFactory:        kb.dynamicFactory,
 	}
+
+	itemBackupper := &defaultItemBackupper{
+		backupRequest:           backupRequest,
+		tarWriter:               tw,
+		dynamicFactory:          kb.dynamicFactory,
+		discoveryHelper:         kb.discoveryHelper,
+		resticBackupper:         resticBackupper,
+		resticSnapshotTracker:   newPVCSnapshotTracker(),
+		volumeSnapshotterGetter: volumeSnapshotterGetter,
+		itemHookHandler:         &defaultItemHookHandler{podCommandExecutor: kb.podCommandExecutor},
+	}
+	itemBackupper.additionalItemBackupper = itemBackupper
+
+	resources := resourceCollector.collectResources()
+	log.Warnf("Collected %d resources", len(resources))
+
+	for i, item := range resources {
+		log.Warnf("Backing up resource %d of %d", i+1, len(resources))
+		itemBackupper.backupItem(log, item, item.groupResource)
+	}
+
+	log.Warnf("Backed up %d resources", len(backupRequest.BackedUpItems))
 
 	return nil
 }
